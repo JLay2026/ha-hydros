@@ -1,12 +1,12 @@
 {
   "domain": "hydros",
   "name": "HA-Hydros",
-  "version": "0.3.1",
-  "documentation": "https://github.com/Bitf1ip/ha-hydros",
-  "issue_tracker": "https://github.com/Bitf1ip/ha-hydros/issues",
+  "version": "0.3.2",
+  "documentation": "https://github.com/JLay2026/ha-hydros",
+  "issue_tracker": "https://github.com/JLay2026/ha-hydros/issues",
   "requirements": ["pyhydros==0.4.1"],
   "dependencies": [],
-  "codeowners": ["@Bitf1ip"],
+  "codeowners": ["@JLay2026"],
   "config_flow": true,
   "iot_class": "cloud_push"
 }
