@@ -1,0 +1,83 @@
+# Daily fork sync from Bitf1ip/ha-hydros:main
+#
+# Keeps JLay2026/ha-hydros:main in sync with upstream by fast-forwarding
+# when there's no conflict. On divergence, opens a sync/<date> PR for
+# manual review.
+#
+# Uses GITHUB_TOKEN (fine for fork-internal operations); no PAT needed.
+#
+# Cadence: daily at 06:00 UTC, plus manual trigger via Actions tab.
+#
+# Reference: aormsby/Fork-Sync-With-Upstream-action
+
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # daily 06:00 UTC
+  workflow_dispatch:      # on-demand trigger
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    name: Sync fork main from upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/Bitf1ip/ha-hydros.git
+          git remote -v
+
+      - name: Fetch upstream
+        run: git fetch upstream main
+
+      - name: Detect divergence
+        id: divergence
+        run: |
+          # Check if upstream/main has commits not in fork's main
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          AHEAD=$(git rev-list --count upstream/main..HEAD)
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+          echo "ahead=$AHEAD" >> $GITHUB_OUTPUT
+          echo "Fork is $BEHIND commits behind upstream, $AHEAD commits ahead"
+
+      - name: Fast-forward sync (no divergence)
+        if: steps.divergence.outputs.behind != '0' && steps.divergence.outputs.ahead == '0'
+        run: |
+          echo "::notice::Fast-forwarding main from upstream (no divergence)"
+          git merge --ff-only upstream/main
+          git push origin main
+
+      - name: Open sync PR (divergence detected)
+        if: steps.divergence.outputs.behind != '0' && steps.divergence.outputs.ahead != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          BRANCH="sync/$DATE"
+          echo "::notice::Fork and upstream have diverged. Opening sync PR on branch $BRANCH"
+          
+          # Create sync branch from upstream/main
+          git checkout -b "$BRANCH" upstream/main
+          git push origin "$BRANCH"
+          
+          # Open PR; will require manual conflict resolution
+          gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "sync: pull upstream main ($DATE)" \
+            --body "Automated sync from \`Bitf1ip/ha-hydros:main\`. Fork has diverged ($([ ${{ steps.divergence.outputs.behind }} -gt 0 ] && echo \"${{ steps.divergence.outputs.behind }} commits behind\")$([ ${{ steps.divergence.outputs.ahead }} -gt 0 ] && echo \", ${{ steps.divergence.outputs.ahead }} commits ahead\")). Review and resolve any conflicts before merging. See \`CONTRIBUTING.md\` → 'Daily upstream sync' for context."
+
+      - name: Already in sync (no action)
+        if: steps.divergence.outputs.behind == '0'
+        run: echo "::notice::Fork main is already in sync with upstream main; nothing to do"
