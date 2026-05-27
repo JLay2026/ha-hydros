@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## Unreleased — v0.4.0 (in progress)
+
+> Hardening sprint. v0.4.0 will be tagged after issues [#3](../../issues/3), [#4](../../issues/4), [#5](../../issues/5), and [#6](../../issues/6) are all merged. Each PR below adds to this section; the section is renamed to `## 0.4.0 - YYYY-MM-DD` on release.
+
+### Added
+- **[#6 — MQTT debug-sample sanitization]** New `custom_components/hydros/sanitizer.py` redacts sensitive content from the debug sample sensor's state attributes by default. Replaces emails, JWT tokens, presigned S3 URLs, MQTT-URI-embedded credentials, and values for keys matching `password`/`token`/`secret`/`credential`/`signature`/`serial*`/`*accountId`/`*userId`/`*email`/`apikey`/`cookie`/`session*`/`x-amz-*`/`aws_*`/`*licenseKey`/`*productKey` with `[REDACTED]` placeholders. Device identifiers (`thingId`, `thingName`, `thingType`) are preserved so debugging stays useful.
+- **[#6]** New `Unsanitized debug output` options-flow toggle (default OFF) lets operators opt into raw debug output with a README warning. State attributes include a `sanitized: true/false` field so downstream consumers know what they're looking at.
+- **[#6]** Test suite at `tests/test_sanitizer.py` covers happy path, structure preservation, and each redaction category (key match, email, JWT, MQTT creds, presigned URL). Runs standalone with `python -m unittest tests.test_sanitizer`; will be picked up by `pytest` once the test runner is wired into CI.
+
 ## 0.3.4 - 2026-05-27
 
 > Sync from upstream Bitf1ip/ha-hydros v0.3.2–0.3.4. Brings in 0-10v variable-pump support, the XP8 Total Power sensor, and the hassfest CI workflow. Fork's H1 fix from v0.3.2 is retained (upstream's port in v0.3.3 was functionally identical so no merge needed). No new fork-specific changes in this release — purely upstream alignment.

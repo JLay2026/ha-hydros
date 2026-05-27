@@ -15,8 +15,10 @@ from .const import (
     CONF_ENABLE_REMOTE_CONTROL,
     CONF_PASSWORD,
     CONF_REGION,
+    CONF_UNSANITIZED_DEBUG,
     CONF_USERNAME,
     DEFAULT_REGION,
+    DEFAULT_UNSANITIZED_DEBUG,
     DOMAIN,
 )
 
@@ -213,6 +215,7 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._config_entry = config_entry
         self._pending_enable_remote = False
+        self._pending_unsanitized_debug = DEFAULT_UNSANITIZED_DEBUG
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         current_enabled = bool(
@@ -221,12 +224,22 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                 self._config_entry.data.get(CONF_ENABLE_REMOTE_CONTROL, False),
             )
         )
+        current_unsanitized = bool(
+            self._config_entry.options.get(
+                CONF_UNSANITIZED_DEBUG,
+                DEFAULT_UNSANITIZED_DEBUG,
+            )
+        )
 
         schema = vol.Schema(
             {
                 vol.Required(
                     CONF_ENABLE_REMOTE_CONTROL,
                     default=current_enabled,
+                ): bool,
+                vol.Required(
+                    CONF_UNSANITIZED_DEBUG,
+                    default=current_unsanitized,
                 ): bool,
             }
         )
@@ -239,10 +252,16 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             )
 
         enable_remote = bool(user_input.get(CONF_ENABLE_REMOTE_CONTROL, False))
+        self._pending_unsanitized_debug = bool(
+            user_input.get(CONF_UNSANITIZED_DEBUG, DEFAULT_UNSANITIZED_DEBUG)
+        )
         if not enable_remote:
             return self.async_create_entry(
                 title="",
-                data={CONF_ENABLE_REMOTE_CONTROL: False},
+                data={
+                    CONF_ENABLE_REMOTE_CONTROL: False,
+                    CONF_UNSANITIZED_DEBUG: self._pending_unsanitized_debug,
+                },
             )
 
         self._pending_enable_remote = True
@@ -278,10 +297,16 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
         if not self._pending_enable_remote:
             return self.async_create_entry(
                 title="",
-                data={CONF_ENABLE_REMOTE_CONTROL: False},
+                data={
+                    CONF_ENABLE_REMOTE_CONTROL: False,
+                    CONF_UNSANITIZED_DEBUG: self._pending_unsanitized_debug,
+                },
             )
 
         return self.async_create_entry(
             title="",
-            data={CONF_ENABLE_REMOTE_CONTROL: True},
+            data={
+                CONF_ENABLE_REMOTE_CONTROL: True,
+                CONF_UNSANITIZED_DEBUG: self._pending_unsanitized_debug,
+            },
         )

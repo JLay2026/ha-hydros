@@ -35,7 +35,27 @@ Example of good usage for this integration includes: long term metrics, triggeri
 
 ## Notes
 - Credentials are stored in Home Assistant config entries.
-- Debug samples are stored in memory (not persisted).
+- Debug samples are stored in memory (not persisted) and **sanitized by default** (Issue #6 / v0.4.0). Emails, JWT tokens, presigned S3 URLs, MQTT credentials embedded in URIs, and fields whose name suggests sensitive content (`password`, `token`, `secret`, `credential`, `signature`, `serial*`, `*accountId`, `*userId`, `*email`, `apikey`, `cookie`, `session*`, `x-amz-*`, `aws_*`, `*licenseKey`, `*productKey`) are replaced with `[REDACTED]` placeholders. Device-level identifiers (`thingId`, `thingName`, `thingType`) are kept intact so the debug output remains useful. The state attributes include a `sanitized: true` field so consumers know what they're looking at.
+
+### Unsanitized debug output (opt-in)
+
+An options-flow toggle, **Unsanitized debug output**, disables sanitization entirely. Default: **off**.
+
+⚠️ **Do not enable this on a recorder-equipped HA instance** — once enabled, every debug sample is written verbatim into the recorder database (and exported wherever your recorder is configured to ship data: InfluxDB, MariaDB, Prometheus, etc.). Credentials and presigned URLs in the captured payload will be persisted to long-term storage.
+
+Enable only when:
+- You're actively troubleshooting a sanitizer false-positive that's hiding the data you need
+- Your recorder is excluding `sensor.*debug*` entities (recommended snippet below regardless)
+- You'll turn the toggle back off immediately after capturing the sample
+
+Recommended `configuration.yaml` exclusion (apply regardless of the toggle):
+
+```yaml
+recorder:
+  exclude:
+    entity_globs:
+      - sensor.*_debug_sample
+```
 
 ## ⚠️ Safety Warning & Disclaimer 
 
