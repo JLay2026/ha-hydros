@@ -7,8 +7,10 @@ CONF_REGION = "region"
 CONF_COLLECTIVES = "collectives"
 CONF_ENABLE_REMOTE_CONTROL = "enable_remote_control"
 CONF_ACCEPT_REMOTE_CONTROL_DISCLAIMER = "accept_remote_control_disclaimer"
+CONF_UNSANITIZED_DEBUG = "unsanitized_debug"
 DEFAULT_REGION = "us-west-2"
 DEFAULT_WATCHDOG_INACTIVITY = 5
+DEFAULT_UNSANITIZED_DEBUG = False
 
 PLATFORMS: list[str] = ["sensor", "binary_sensor", "button", "select"]
 

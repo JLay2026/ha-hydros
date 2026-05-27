@@ -52,6 +52,7 @@ from .entity_builders import (
     build_output_power_description,
     build_output_sensor_description,
 )
+from .sanitizer import sanitize_payload
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -976,15 +977,23 @@ class HydrosSensor(SensorEntity):
 
         if self._section == "CollectiveDebug":
             sample = self._hub.get_debug_sample(self._thing_id)
+            unsanitized = self._hub.unsanitized_debug_enabled
             if not sample:
                 return {
                     "collected": None,
                     "config_json": None,
                     "mqtt_json": None,
+                    "sanitized": not unsanitized,
                 }
             config = sample.get("config")
             mqtt = sample.get("mqtt")
-            attrs = {"collected": sample.get("collected")}
+            if not unsanitized:
+                config = sanitize_payload(config)
+                mqtt = sanitize_payload(mqtt)
+            attrs = {
+                "collected": sample.get("collected"),
+                "sanitized": not unsanitized,
+            }
             try:
                 attrs["config_json"] = json.dumps(config, sort_keys=True)
             except (TypeError, ValueError):

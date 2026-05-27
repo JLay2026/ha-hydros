@@ -18,8 +18,10 @@ from .const import (
     CONF_COLLECTIVES,
     CONF_PASSWORD,
     CONF_REGION,
+    CONF_UNSANITIZED_DEBUG,
     CONF_USERNAME,
     DEFAULT_REGION,
+    DEFAULT_UNSANITIZED_DEBUG,
     DEFAULT_WATCHDOG_INACTIVITY,
     SIGNAL_COLLECTIVE_UPDATED,
     SIGNAL_CONFIG_UPDATED,
@@ -87,6 +89,20 @@ class HydrosHub:
     @property
     def entry_id(self) -> str:
         return self._entry.entry_id
+
+    @property
+    def unsanitized_debug_enabled(self) -> bool:
+        """Return True if the operator opted in to raw debug output (Issue #6).
+
+        Defaults to ``False`` so the debug sample sensor emits sanitized
+        payloads and is safe to include in HA recorder / InfluxDB exports.
+        """
+        return bool(
+            self._entry.options.get(
+                CONF_UNSANITIZED_DEBUG,
+                DEFAULT_UNSANITIZED_DEBUG,
+            )
+        )
 
     async def async_setup(self) -> None:
         if _IMPORT_ERROR is not None:
