@@ -34,12 +34,18 @@ from homeassistant.helpers import entity_registry as er
 
 from .const import DOMAIN
 from .hydros_hub import HydrosHub
-from .types import is_binary_output, is_doser_output, coerce_int as _coerce_int
+from .types import (
+    is_binary_output,
+    is_doser_output,
+    is_variable_pump_output,
+    coerce_int as _coerce_int,
+)
 from .entity_builders import (
     build_collective_alerts_description,
     build_collective_debug_description,
     build_collective_description,
     build_collective_mode_description,
+    build_collective_xp8_power_description,
     build_doser_reservoir_description,
     build_doser_today_description,
     build_input_sensor_description,
@@ -239,7 +245,17 @@ COLLECTIVE_HEARTBEAT_OFFLINE_SECONDS = 30
 COLLECTIVE_HEARTBEAT_STALE_SECONDS = 300
 
 
-def _normalize_output_value(key: str | None, value: Any) -> Any:
+def _normalize_output_value(
+    key: str | None,
+    value: Any,
+    metadata: dict[str, Any] | None = None,
+) -> Any:
+    if key == "valueState" and is_variable_pump_output(metadata):
+        try:
+            return round(float(value) / 100.0, 3)
+        except (TypeError, ValueError):
+            return value
+
     transform = OUTPUT_VALUE_TRANSFORMS.get(key or "")
     if not transform:
         return value
@@ -262,6 +278,16 @@ def _round_probe_value(value: float) -> float:
         return round(float(value), 2)
     except (TypeError, ValueError):
         return value
+
+def _coerce_numeric_value(candidate: Any) -> float | int | None:
+    if isinstance(candidate, (int, float)):
+        return candidate
+    if isinstance(candidate, str):
+        try:
+            return float(candidate)
+        except ValueError:
+            return None
+    return None
 
 
 def _map_triple_level(value: float | int) -> str:
@@ -657,6 +683,22 @@ class HydrosSensorManager:
                 ),
             )
 
+            xp8_power_description = build_collective_xp8_power_description(
+                HydrosSensorEntityDescription,
+                entry=self._entry,
+                thing_id=thing_id,
+                device_name=device_name,
+            )
+            descriptions[xp8_power_description.key] = (
+                xp8_power_description,
+                DeviceInfo(
+                    identifiers={(DOMAIN, thing_id)},
+                    name=device_name,
+                    manufacturer=manufacturer,
+                    model=model,
+                ),
+            )
+
             if thing_id not in self._subscribed:
                 try:
                     await self._hub.async_subscribe_collective_status(thing_id)
@@ -781,6 +823,33 @@ class HydrosSensor(SensorEntity):
             mode = payload.get("mode")
             return mode or "unknown"
 
+        if self._section == "CollectiveXP8Power":
+            payload = self._hub.get_collective_status_payload(self._thing_id) or {}
+            health = payload.get("health")
+            if not isinstance(health, dict):
+                return None
+
+            power_scale = OUTPUT_VALUE_TRANSFORMS.get("powerI", (None, 1.0))[1]
+
+            total_raw_power = 0.0
+            found = False
+            for node_payload in health.values():
+                if not isinstance(node_payload, dict):
+                    continue
+                ac_power = node_payload.get("acPower")
+                if not isinstance(ac_power, dict):
+                    continue
+                raw_power = _coerce_numeric_value(ac_power.get("powerI"))
+                if raw_power is None:
+                    continue
+                total_raw_power += float(raw_power)
+                found = True
+
+            if not found:
+                return None
+
+            return round(total_raw_power * power_scale, 3)
+
         metadata: dict[str, Any] | None = None
         if self._section == "Output":
             metadata = self._hub.get_output_metadata(self._thing_id, self._input_key)
@@ -826,23 +895,27 @@ class HydrosSensor(SensorEntity):
             else:
                 ordered_keys = base_key_order
 
-            if self._section == "Output" and self._primary_key == "valueState":
+            if (
+                self._section == "Output"
+                and self._primary_key == "valueState"
+                and not is_variable_pump_output(metadata)
+            ):
                 override_state = self._interpret_output_state(value, metadata)
                 if override_state is not None:
                     return override_state
 
             for key in ordered_keys:
-                numeric = _coerce_numeric(value.get(key))
+                numeric = _coerce_numeric_value(value.get(key))
                 if numeric is not None:
                     if self._section == "Output":
-                        return _normalize_output_value(key, numeric)
+                        return _normalize_output_value(key, numeric, metadata)
                     return self._apply_input_transform(numeric)
             return None
 
         numeric_value = _coerce_numeric(value)
         if numeric_value is not None:
             if self._section == "Output":
-                return _normalize_output_value(self._primary_key, numeric_value)
+                return _normalize_output_value(self._primary_key, numeric_value, metadata)
             return self._apply_input_transform(numeric_value)
         return None
 
@@ -922,6 +995,38 @@ class HydrosSensor(SensorEntity):
                 attrs["mqtt_json"] = None
             return attrs
 
+        if self._section == "CollectiveXP8Power":
+            payload = self._hub.get_collective_status_payload(self._thing_id) or {}
+            health = payload.get("health")
+            if not isinstance(health, dict):
+                return None
+
+            power_scale = OUTPUT_VALUE_TRANSFORMS.get("powerI", (None, 1.0))[1]
+
+            sources: dict[str, float] = {}
+            for node_id, node_payload in health.items():
+                if not isinstance(node_payload, dict):
+                    continue
+                ac_power = node_payload.get("acPower")
+                if not isinstance(ac_power, dict):
+                    continue
+                raw_power = _coerce_numeric_value(ac_power.get("powerI"))
+                if raw_power is None:
+                    continue
+                sources[str(node_id)] = round(float(raw_power) * power_scale, 3)
+
+            if not sources:
+                return None
+
+            attrs = {
+                "source_count": len(sources),
+                "sources": sources,
+            }
+            ts = self._hub.get_latest_status_ts(self._thing_id)
+            if ts:
+                attrs["last_update"] = ts.isoformat()
+            return attrs
+
         if self._section == "DosedToday":
             attrs: dict[str, Any] = {}
             total_updated = self._hub.get_dosing_total_updated(self._thing_id, self._input_key)
@@ -954,7 +1059,7 @@ class HydrosSensor(SensorEntity):
             if key in payload and f"last_{key}" not in attrs:
                 value = payload[key]
                 if self._section == "Output" and key in OUTPUT_VALUE_TRANSFORMS:
-                    normalized = _normalize_output_value(key, value)
+                    normalized = _normalize_output_value(key, value, metadata)
                     if isinstance(normalized, (int, float)):
                         if key == "frequency":
                             normalized = normalized / 100.0
@@ -968,6 +1073,12 @@ class HydrosSensor(SensorEntity):
                     attrs[f"last_{key}"] = transformed
                     if transformed != value:
                         attrs[f"last_{key}_raw"] = value
+                elif self._section == "Output" and key == "valueState":
+                    normalized = _normalize_output_value(key, value, metadata)
+                    attrs[f"last_{key}"] = normalized
+                    if normalized != value:
+                        attrs[f"last_{key}_raw"] = value
+                        attrs[f"last_{key}_unit"] = "%"
                 else:
                     attrs[f"last_{key}"] = value
 

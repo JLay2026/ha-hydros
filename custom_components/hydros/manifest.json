@@ -1,12 +1,16 @@
 {
   "domain": "hydros",
   "name": "HA-Hydros",
-  "version": "0.3.2",
+  "version": "0.3.4",
   "documentation": "https://github.com/JLay2026/ha-hydros",
   "issue_tracker": "https://github.com/JLay2026/ha-hydros/issues",
-  "requirements": ["pyhydros==0.4.1"],
+  "requirements": [
+    "pyhydros==0.4.1"
+  ],
   "dependencies": [],
-  "codeowners": ["@JLay2026"],
+  "codeowners": [
+    "@JLay2026"
+  ],
   "config_flow": true,
   "iot_class": "cloud_push"
 }
