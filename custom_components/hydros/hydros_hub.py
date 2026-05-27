@@ -15,6 +15,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    BACKOFF_EXPONENT_CAP,
     CONF_COLLECTIVES,
     CONF_PASSWORD,
     CONF_REGION,
@@ -23,6 +24,10 @@ from .const import (
     DEFAULT_REGION,
     DEFAULT_UNSANITIZED_DEBUG,
     DEFAULT_WATCHDOG_INACTIVITY,
+    DOSING_POLL_INTERVAL_SECONDS,
+    ENTITY_REFRESH_INTERVAL_SECONDS,
+    MQTT_WATCHDOG_MAX_SECONDS,
+    RATE_LIMITED_BACKOFF_MULTIPLIER,
     SIGNAL_COLLECTIVE_UPDATED,
     SIGNAL_CONFIG_UPDATED,
 )
@@ -52,6 +57,59 @@ def _extract_profile_thing_id(thing: dict[str, Any]) -> str | None:
     return None
 
 
+def _parse_retry_after(response: Any) -> int | None:
+    """Return ``Retry-After`` header from a response, in seconds (Issue #5).
+
+    RFC 7231 allows two forms: integer seconds, or HTTP-date. Honor both.
+    Returns ``None`` if the header is absent or unparseable.
+    """
+    if response is None:
+        return None
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    raw = None
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except Exception:  # pragma: no cover - tolerant against odd header types
+        return None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    # Integer-seconds form.
+    try:
+        seconds = int(raw)
+        return max(0, seconds)
+    except (TypeError, ValueError):
+        pass
+    # HTTP-date form.
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(raw)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when is None:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = (when - datetime.now(timezone.utc)).total_seconds()
+    if delta <= 0:
+        return 0
+    return int(delta)
+
+
+def _backoff_seconds(consecutive_failures: int, base_seconds: int) -> int:
+    """Compute exponential backoff (Issue #5).
+
+    Multiplier sequence: 1, 2, 4, 8, ..., capped at ``BACKOFF_EXPONENT_CAP``.
+    For ``consecutive_failures`` n >= 1, returns ``min(2^(n-1), CAP) * base_seconds``.
+    """
+    if consecutive_failures <= 0:
+        return 0
+    multiplier = min(2 ** (consecutive_failures - 1), BACKOFF_EXPONENT_CAP)
+    return multiplier * base_seconds
+
+
 class HydrosHub:
     """Coordinate Hydros data access for Home Assistant."""
 
@@ -73,6 +131,13 @@ class HydrosHub:
         self._subscription_watchdogs: dict[str, asyncio.TimerHandle] = {}
         self._status_handlers: dict[str, Callable[[str, Any], None]] = {}
         self._debug_samples: dict[str, dict[str, Any]] = {}
+        # Issue #5: per-key backoff state for dosing-logs and per-thing for collective-config.
+        self._dosing_backoff_until: dict[tuple[str, str], datetime] = {}
+        self._dosing_consecutive_failures: dict[tuple[str, str], int] = {}
+        self._collective_config_backoff_until: dict[str, datetime] = {}
+        self._collective_config_consecutive_failures: dict[str, int] = {}
+        # Issue #5: per-thing exponential backoff for the MQTT watchdog.
+        self._mqtt_retry_failures: dict[str, int] = {}
         self._mqtt_primary: str | None = None
         self._mqtt_lock = asyncio.Lock()
         self._mqtt_client_id: str = f"ha-hydros-{uuid.uuid4().hex}"
@@ -141,6 +206,11 @@ class HydrosHub:
         self._collective_configs.clear()
         self._config_locks.clear()
         self._collective_status.clear()
+        self._dosing_backoff_until.clear()
+        self._dosing_consecutive_failures.clear()
+        self._collective_config_backoff_until.clear()
+        self._collective_config_consecutive_failures.clear()
+        self._mqtt_retry_failures.clear()
         self._subscriptions.clear()
         for handle in self._subscription_watchdogs.values():
             handle.cancel()
@@ -306,6 +376,14 @@ class HydrosHub:
         if not thing_id or not output_name:
             return
 
+        key = (thing_id, output_name)
+
+        # Issue #5 (Fix 2): skip the poll if we're inside the backoff window
+        # from a previous failure. The window is cleared on success below.
+        backoff = self._dosing_backoff_until.get(key)
+        if backoff and datetime.now(timezone.utc) < backoff:
+            return
+
         async with self._dosing_log_lock:
             api = await self._hass.async_add_executor_job(self._ensure_client)
             local_now = dt_util.now()
@@ -324,10 +402,49 @@ class HydrosHub:
                     end=end_time,
                 )
 
+            def _set_backoff(seconds: int) -> None:
+                self._dosing_backoff_until[key] = (
+                    datetime.now(timezone.utc) + timedelta(seconds=seconds)
+                )
+
+            def _record_failure_and_backoff() -> int:
+                self._dosing_consecutive_failures[key] = (
+                    self._dosing_consecutive_failures.get(key, 0) + 1
+                )
+                wait = _backoff_seconds(
+                    self._dosing_consecutive_failures[key],
+                    DOSING_POLL_INTERVAL_SECONDS,
+                )
+                _set_backoff(wait)
+                return wait
+
             try:
                 entries = await self._hass.async_add_executor_job(_fetch_logs)
             except requests.exceptions.HTTPError as err:
                 status = getattr(err.response, "status_code", None)
+
+                if status == 429:
+                    # Issue #5 (Fix 1): honor Retry-After if provided, else use a
+                    # longer backoff than the exponential schedule.
+                    retry_after = _parse_retry_after(err.response)
+                    wait = (
+                        retry_after
+                        if retry_after is not None
+                        else DOSING_POLL_INTERVAL_SECONDS * RATE_LIMITED_BACKOFF_MULTIPLIER
+                    )
+                    _set_backoff(wait)
+                    self._dosing_consecutive_failures[key] = max(
+                        self._dosing_consecutive_failures.get(key, 0) + 1,
+                        BACKOFF_EXPONENT_CAP,
+                    )
+                    _LOGGER.warning(
+                        "Hydros rate-limited dosing logs for %s/%s; backing off %ss",
+                        thing_id,
+                        output_name,
+                        wait,
+                    )
+                    return
+
                 if status in (401, 403):
                     _LOGGER.warning(
                         "Hydros dosing logs unauthorized for %s/%s; re-authenticating",
@@ -339,39 +456,51 @@ class HydrosHub:
                         entries = await self._hass.async_add_executor_job(_fetch_logs)
                     except Exception as retry_err:
                         # Issue #4: sanitize the third-party exception message.
+                        # Issue #5 (Fix 2): apply exponential backoff.
+                        wait = _record_failure_and_backoff()
                         _LOGGER.warning(
-                            "Failed to refresh dosing logs for %s/%s after re-auth: %s",
+                            "Failed to refresh dosing logs for %s/%s after re-auth: %s (backing off %ss)",
                             thing_id,
                             output_name,
                             sanitize_string(str(retry_err)),
+                            wait,
                         )
                         return
                 else:
+                    wait = _record_failure_and_backoff()
                     _LOGGER.warning(
-                        "Failed to refresh dosing logs for %s/%s: %s",
+                        "Failed to refresh dosing logs for %s/%s: %s (backing off %ss)",
                         thing_id,
                         output_name,
                         err,
+                        wait,
                     )
                     return
             except HydrosAPIError as err:
+                wait = _record_failure_and_backoff()
                 _LOGGER.warning(
-                    "Failed to refresh dosing logs for %s/%s: %s",
+                    "Failed to refresh dosing logs for %s/%s: %s (backing off %ss)",
                     thing_id,
                     output_name,
                     err,
+                    wait,
                 )
                 return
             except Exception as err:  # pragma: no cover
+                wait = _record_failure_and_backoff()
                 _LOGGER.warning(
-                    "Unexpected error refreshing dosing logs for %s/%s: %s",
+                    "Unexpected error refreshing dosing logs for %s/%s: %s (backing off %ss)",
                     thing_id,
                     output_name,
                     err,
+                    wait,
                 )
                 return
 
-            key = (thing_id, output_name)
+            # Success path: clear any prior backoff state.
+            self._dosing_backoff_until.pop(key, None)
+            self._dosing_consecutive_failures.pop(key, None)
+
             current_day = start_local.date()
             if self._dosing_day_cache.get(key) != current_day:
                 self._dosing_day_cache[key] = current_day
@@ -573,6 +702,16 @@ class HydrosHub:
         if thing_id in self._collective_configs:
             return self._collective_configs[thing_id]
 
+        # Issue #5 (Fix 3): if we're inside the backoff window from a previous
+        # failure, do not attempt another download. Raise so callers handle
+        # the gap; the next periodic refresh (or MQTT config-push) will try
+        # again once the window closes.
+        backoff = self._collective_config_backoff_until.get(thing_id)
+        if backoff and datetime.now(timezone.utc) < backoff:
+            raise HydrosAPIError(
+                f"Hydros config for {thing_id} is in backoff window"
+            )
+
         lock = self._config_locks.setdefault(thing_id, asyncio.Lock())
         async with lock:
             if thing_id in self._collective_configs:
@@ -612,11 +751,28 @@ class HydrosHub:
                         config[key] = value
 
             if not config:
+                # Issue #5 (Fix 3): record the failure and arm exponential backoff.
+                self._collective_config_consecutive_failures[thing_id] = (
+                    self._collective_config_consecutive_failures.get(thing_id, 0) + 1
+                )
+                wait = _backoff_seconds(
+                    self._collective_config_consecutive_failures[thing_id],
+                    ENTITY_REFRESH_INTERVAL_SECONDS,
+                )
+                self._collective_config_backoff_until[thing_id] = (
+                    datetime.now(timezone.utc) + timedelta(seconds=wait)
+                )
                 if download_error is not None:
-                    _LOGGER.error("Failed to load Hydros config for %s: %s", thing_id, download_error)
+                    _LOGGER.error(
+                        "Failed to load Hydros config for %s: %s (backing off %ss)",
+                        thing_id, download_error, wait,
+                    )
                     raise download_error
                 raise HydrosAPIError(f"Hydros config for {thing_id} is empty")
 
+            # Success path: clear any prior backoff state.
+            self._collective_config_backoff_until.pop(thing_id, None)
+            self._collective_config_consecutive_failures.pop(thing_id, None)
             self._collective_configs[thing_id] = config
             return config
 
@@ -694,8 +850,17 @@ class HydrosHub:
             handle.cancel()
         if thing_id not in self._subscriptions and thing_id not in self._status_handlers:
             return
+        # Issue #5 (Fix 4): exponential backoff on the MQTT subscription
+        # watchdog. Base = DEFAULT_WATCHDOG_INACTIVITY (5s). After N consecutive
+        # retry failures, the watchdog delay grows 2^N up to MQTT_WATCHDOG_MAX_SECONDS.
+        # Resets to base on any real MQTT message (see _handle_status_update).
+        n = self._mqtt_retry_failures.get(thing_id, 0)
+        delay = min(
+            DEFAULT_WATCHDOG_INACTIVITY * (2 ** n),
+            MQTT_WATCHDOG_MAX_SECONDS,
+        )
         self._subscription_watchdogs[thing_id] = self._hass.loop.call_later(
-            DEFAULT_WATCHDOG_INACTIVITY,
+            delay,
             self._subscription_watchdog_fired,
             thing_id,
         )
@@ -731,32 +896,48 @@ class HydrosHub:
                 self._reregister_collective_status_blocking, api, thing_id, handler
             )
         except HydrosMQTTError as err:
+            # Issue #5 (Fix 4): bump per-thing failure counter for the watchdog
+            # exponential backoff. The else branch on success below clears it.
+            self._mqtt_retry_failures[thing_id] = (
+                self._mqtt_retry_failures.get(thing_id, 0) + 1
+            )
             message = str(err).lower()
             if "mqtt not connected" in message:
                 _LOGGER.warning(
-                    "Hydros MQTT disconnected for %s; reconnecting",
+                    "Hydros MQTT disconnected for %s; reconnecting (failure #%d)",
                     thing_id,
+                    self._mqtt_retry_failures[thing_id],
                 )
                 try:
                     await self._hass.async_add_executor_job(
                         self._force_reconnect_and_register, api, thing_id, handler
                     )
+                    # Reconnect succeeded — partial recovery; let _handle_status_update
+                    # clear the counter when a real message arrives.
                     return
                 except HydrosMQTTError as retry_err:
                     _LOGGER.warning(
-                        "Failed to reconnect Hydros MQTT for %s: %s",
+                        "Failed to reconnect Hydros MQTT for %s: %s (failure #%d)",
                         thing_id,
                         retry_err,
+                        self._mqtt_retry_failures[thing_id],
                     )
             else:
                 _LOGGER.warning(
-                    "Failed to re-register Hydros MQTT for %s: %s",
+                    "Failed to re-register Hydros MQTT for %s: %s (failure #%d)",
                     thing_id,
                     err,
+                    self._mqtt_retry_failures[thing_id],
                 )
         except Exception as err:  # pragma: no cover
             _LOGGER.exception("Unexpected error while retrying Hydros MQTT subscription")
+        else:
+            # Issue #5 (Fix 4): re-register succeeded — reset the watchdog backoff.
+            self._mqtt_retry_failures.pop(thing_id, None)
         finally:
+            # Issue #5 (Fix 4): on persistent failure paths we bump the retry counter
+            # so the NEXT watchdog fires later (exponential). On success the else
+            # branch above already cleared it.
             self._ensure_watchdog(thing_id)
 
     def _handle_status_update(self, thing_id: str, payload: Any) -> None:
@@ -774,6 +955,11 @@ class HydrosHub:
         record["received"] = datetime.now(timezone.utc)
         record["message_count"] = int(record.get("message_count", 0)) + 1
         self._collective_status[thing_id] = record
+
+        # Issue #5 (Fix 4): a real MQTT message means the connection is healthy.
+        # Reset the watchdog backoff counter so the next inactivity fires at
+        # the base DEFAULT_WATCHDOG_INACTIVITY (not the previously-grown delay).
+        self._mqtt_retry_failures.pop(thing_id, None)
 
         self._ensure_watchdog(thing_id)
         async_dispatcher_send(self._hass, self.signal_for_collective(thing_id), thing_id)
