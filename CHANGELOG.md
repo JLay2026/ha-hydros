@@ -16,6 +16,14 @@ All notable changes to this project are documented in this file.
 - **[#4]** `hydros_hub.py` and `config_flow.py` `_LOGGER.{error,warning}` calls that pass `pyhydros` exception objects now route through `sanitize_string()`. Two `_LOGGER.exception(...)` call sites were replaced with `_LOGGER.error(... type=%s ...)` plus `_LOGGER.debug("...", exc_info=True)` so the full traceback (which can carry frame-local variables on some log-shipping integrations) emits only when the user explicitly enables DEBUG for `custom_components.hydros`.
 - **[#4]** 4 new tests in `tests/test_sanitizer.py` covering `sanitize_string()` against realistic pyhydros-style error messages (email, JWT, presigned URL, safe-message passthrough).
 
+- **[#5 — Rate-limit / backoff posture]** New `docs/RATE_LIMITS.md` documents the polling cadence (30-min entity refresh, 5-min dosing-logs poll, 5-s MQTT watchdog base) and the exponential backoff envelope applied to each. Reproducible `tc qdisc` test included for operators.
+- **[#5]** New constants in `const.py`: `DOSING_POLL_INTERVAL_SECONDS=300`, `ENTITY_REFRESH_INTERVAL_SECONDS=1800`, `MQTT_WATCHDOG_MAX_SECONDS=60`, `BACKOFF_EXPONENT_CAP=5`, `RATE_LIMITED_BACKOFF_MULTIPLIER=10`.
+- **[#5]** `hydros_hub.async_refresh_dosing_logs` now (a) skips polls while inside a per-key backoff window, (b) honors HTTP 429 with `Retry-After` (both seconds and HTTP-date forms), (c) applies exponential 1× → 5× backoff on consecutive failures, and (d) clears state on first successful poll.
+- **[#5]** `hydros_hub.async_get_collective_config` applies the same exponential backoff per-thing_id at the 30-min entity-refresh layer.
+- **[#5]** MQTT subscription watchdog: per-thing exponential backoff in `_ensure_watchdog` (5s → 10s → 20s → 40s → 60s cap). Reset to base on any real MQTT status message via `_handle_status_update`. Takes broken-broker scenario from ~720 reconnect attempts/hr to ~70 (~10× reduction).
+- **[#5]** New module helpers `_parse_retry_after()` and `_backoff_seconds()` with 15 unit tests in `tests/test_backoff.py` covering math, header parsing (integer + HTTP-date + edge cases), and state-machine shape. Same standalone-runnable pattern as `tests/test_sanitizer.py`.
+- **[#5]** README: new Polling cadence and backoff section with a link to `docs/RATE_LIMITS.md`.
+
 > Follow-up: [#14](../../issues/14) tracks a direct audit of the `pyhydros` library for credential leaks in exception messages — deferred from v0.4.0 because the defense-in-depth wrappers above make it non-blocking.
 
 ## 0.3.4 - 2026-05-27
