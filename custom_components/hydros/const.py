@@ -19,6 +19,12 @@ MQTT_WATCHDOG_MAX_SECONDS = 60                     # cap for the exponential bac
 BACKOFF_EXPONENT_CAP = 5                           # multiplier sequence: 1x, 2x, 4x, 5x, 5x, ...
 RATE_LIMITED_BACKOFF_MULTIPLIER = 10               # used for 429 responses without Retry-After
 
+# Issue #3: cloud-outage resilience (stale-tolerant entities).
+CONF_CLOUD_STALE_RETENTION_SECONDS = "cloud_stale_retention_seconds"
+DEFAULT_CLOUD_STALE_RETENTION_SECONDS = 600        # 10 min: serve cached value with stale: true
+MIN_CLOUD_STALE_RETENTION_SECONDS = 30             # below this, no improvement over today
+MAX_CLOUD_STALE_RETENTION_SECONDS = 3600           # above 1 hr, refusing to serve cached data is more honest
+
 PLATFORMS: list[str] = ["sensor", "binary_sensor", "button", "select"]
 
 SIGNAL_COLLECTIVE_UPDATED = "hydros_collective_updated_{entry}_{thing}"
