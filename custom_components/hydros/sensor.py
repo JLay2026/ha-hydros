@@ -778,7 +778,10 @@ class HydrosSensor(SensorEntity):
             return False
         if self._section == "Collective":
             return True
-        return self._collective_is_online()
+        # Issue #3: serve cached value during the stale window. The previous
+        # behavior used _collective_is_online() (30s MQTT-heartbeat threshold)
+        # which flipped sensors to unavailable on any WAN flicker.
+        return self._hub.cloud_state_for_thing(self._thing_id) != "unavailable"
 
     def _compute_collective_health_state(self) -> str:
         last_ts = self._hub.get_latest_status_ts(self._thing_id)
@@ -1116,6 +1119,12 @@ class HydrosSensor(SensorEntity):
         collective = self._hub.get_collective_metadata(self._thing_id)
         if isinstance(collective, dict) and collective.get("serialNum"):
             attrs.setdefault("serial_number", collective.get("serialNum"))
+
+        # Issue #3: surface cloud-stale state on per-thing entities so
+        # dashboards can filter on it (e.g. show a warning badge when
+        # state-attributes contains stale=True).
+        if self._hub.cloud_state_for_thing(self._thing_id) == "stale":
+            attrs["stale"] = True
 
         return attrs or None
 
