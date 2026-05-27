@@ -16,16 +16,20 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     BACKOFF_EXPONENT_CAP,
+    CONF_CLOUD_STALE_RETENTION_SECONDS,
     CONF_COLLECTIVES,
     CONF_PASSWORD,
     CONF_REGION,
     CONF_UNSANITIZED_DEBUG,
     CONF_USERNAME,
+    DEFAULT_CLOUD_STALE_RETENTION_SECONDS,
     DEFAULT_REGION,
     DEFAULT_UNSANITIZED_DEBUG,
     DEFAULT_WATCHDOG_INACTIVITY,
     DOSING_POLL_INTERVAL_SECONDS,
     ENTITY_REFRESH_INTERVAL_SECONDS,
+    MAX_CLOUD_STALE_RETENTION_SECONDS,
+    MIN_CLOUD_STALE_RETENTION_SECONDS,
     MQTT_WATCHDOG_MAX_SECONDS,
     RATE_LIMITED_BACKOFF_MULTIPLIER,
     SIGNAL_COLLECTIVE_UPDATED,
@@ -138,6 +142,8 @@ class HydrosHub:
         self._collective_config_consecutive_failures: dict[str, int] = {}
         # Issue #5: per-thing exponential backoff for the MQTT watchdog.
         self._mqtt_retry_failures: dict[str, int] = {}
+        # Issue #3: per-thing last-reported cloud state for transition logging.
+        self._cloud_state_last_reported: dict[str, str] = {}
         self._mqtt_primary: str | None = None
         self._mqtt_lock = asyncio.Lock()
         self._mqtt_client_id: str = f"ha-hydros-{uuid.uuid4().hex}"
@@ -169,6 +175,111 @@ class HydrosHub:
                 DEFAULT_UNSANITIZED_DEBUG,
             )
         )
+
+    # --- Issue #3: cloud-outage resilience ---
+
+    @property
+    def cloud_stale_retention_seconds(self) -> int:
+        """Return the operator-configured stale-window length, clamped.
+
+        Default ``DEFAULT_CLOUD_STALE_RETENTION_SECONDS`` (10 min).
+        Clamped to ``[MIN, MAX]`` so a misconfigured value doesn't make
+        entities permanently "stale" or instantly "unavailable".
+        """
+        raw = self._entry.options.get(
+            CONF_CLOUD_STALE_RETENTION_SECONDS,
+            DEFAULT_CLOUD_STALE_RETENTION_SECONDS,
+        )
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = DEFAULT_CLOUD_STALE_RETENTION_SECONDS
+        if value < MIN_CLOUD_STALE_RETENTION_SECONDS:
+            return MIN_CLOUD_STALE_RETENTION_SECONDS
+        if value > MAX_CLOUD_STALE_RETENTION_SECONDS:
+            return MAX_CLOUD_STALE_RETENTION_SECONDS
+        return value
+
+    # MQTT freshness threshold below which a thing is considered "fresh".
+    # Matches the existing COLLECTIVE_HEARTBEAT_OFFLINE_SECONDS defined in
+    # sensor.py (30s). Duplicated here as a module-level constant so the
+    # hub doesn't depend on sensor.py.
+    _FRESH_THRESHOLD_SECONDS = 30
+
+    def cloud_state_for_thing(self, thing_id: str) -> str:
+        """Return ``'fresh'`` | ``'stale'`` | ``'unavailable'`` (Issue #3).
+
+        - ``'fresh'``: MQTT message within ``_FRESH_THRESHOLD_SECONDS``.
+        - ``'stale'``: MQTT silent past the fresh threshold but still
+          within the operator's configured retention window, AND we
+          have a cached payload to serve.
+        - ``'unavailable'``: past the retention window, OR no cached
+          payload has ever been received.
+
+        Side effect: emits a single ``WARNING`` log line per per-thing
+        state transition (not per call). See :py:meth:`_maybe_log_transition`.
+        """
+        record = self._collective_status.get(thing_id)
+        payload = None if record is None else record.get("payload")
+        received = None if record is None else record.get("received")
+
+        if received is None or not payload:
+            state = "unavailable"
+        else:
+            elapsed = (datetime.now(timezone.utc) - received).total_seconds()
+            if elapsed <= self._FRESH_THRESHOLD_SECONDS:
+                state = "fresh"
+            elif elapsed <= self.cloud_stale_retention_seconds:
+                state = "stale"
+            else:
+                state = "unavailable"
+
+        self._maybe_log_transition(thing_id, state)
+        return state
+
+    def cloud_state_per_thing(self) -> dict[str, str]:
+        """Return ``{thing_id: state}`` for every configured collective."""
+        return {tid: self.cloud_state_for_thing(tid) for tid in self.collective_ids}
+
+    def cloud_stale_global_state(self) -> str:
+        """Aggregate per-thing states for the global cloud-stale binary_sensor.
+
+        - ``'unavailable'``: any thing is unavailable.
+        - ``'on'``: any thing is stale (and none are unavailable).
+        - ``'off'``: all things are fresh.
+        """
+        states = self.cloud_state_per_thing().values()
+        if any(s == "unavailable" for s in states):
+            return "unavailable"
+        if any(s == "stale" for s in states):
+            return "on"
+        return "off"
+
+    def _maybe_log_transition(self, thing_id: str, new_state: str) -> None:
+        """Emit WARN only on state change (Issue #3).
+
+        Prevents log-flooding: per-tick freshness checks would otherwise
+        log every refresh. The transition table is symmetric: any change
+        between fresh/stale/unavailable produces one log line.
+        """
+        prev = self._cloud_state_last_reported.get(thing_id)
+        if prev == new_state:
+            return
+        self._cloud_state_last_reported[thing_id] = new_state
+        if new_state == "fresh" and prev in ("stale", "unavailable"):
+            _LOGGER.warning(
+                "Hydros cloud recovered for %s (was %s)", thing_id, prev
+            )
+        elif new_state == "stale":
+            _LOGGER.warning(
+                "Hydros cloud stale for %s (serving cached value; was %s)",
+                thing_id, prev or "fresh",
+            )
+        elif new_state == "unavailable":
+            _LOGGER.warning(
+                "Hydros cloud unavailable for %s (past %ss retention; was %s)",
+                thing_id, self.cloud_stale_retention_seconds, prev or "fresh",
+            )
 
     async def async_setup(self) -> None:
         if _IMPORT_ERROR is not None:
@@ -211,6 +322,7 @@ class HydrosHub:
         self._collective_config_backoff_until.clear()
         self._collective_config_consecutive_failures.clear()
         self._mqtt_retry_failures.clear()
+        self._cloud_state_last_reported.clear()
         self._subscriptions.clear()
         for handle in self._subscription_watchdogs.values():
             handle.cancel()
