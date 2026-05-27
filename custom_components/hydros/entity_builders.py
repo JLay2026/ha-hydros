@@ -12,6 +12,7 @@ from homeassistant.const import UnitOfPower, UnitOfTemperature, UnitOfVolume, Un
 from homeassistant.util import slugify
 
 from .types import coerce_int as _coerce_int
+from .types import is_variable_pump_output
 
 
 def build_input_sensor_description(
@@ -94,6 +95,10 @@ def build_output_sensor_description(
     transform = output_value_transforms.get(primary_key or "")
     unit = transform[0] if transform else None
     state_class = SensorStateClass.MEASUREMENT if unit else None
+
+    if primary_key == "valueState" and is_variable_pump_output(output_meta):
+        unit = "%"
+        state_class = SensorStateClass.MEASUREMENT
 
     return description_cls(
         key=f"{entry.entry_id}-{thing_id}-{slug}",
@@ -272,6 +277,28 @@ def build_collective_debug_description(
         input_key=thing_id,
         section="CollectiveDebug",
         primary_key=None,
+        value_transform=None,
+    )
+
+
+def build_collective_xp8_power_description(
+    description_cls: Type[SensorEntityDescription],
+    *,
+    entry: ConfigEntry,
+    thing_id: str,
+    device_name: str,
+) -> SensorEntityDescription:
+    slug = slugify(f"{thing_id}-xp8-total-power")
+    return description_cls(
+        key=f"{entry.entry_id}-{thing_id}-{slug}",
+        name=f"{device_name} XP8 Total Power",
+        native_unit_of_measurement=UnitOfPower.WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        thing_id=thing_id,
+        input_key=f"{thing_id}-xp8-total-power",
+        section="CollectiveXP8Power",
+        primary_key="powerI",
         value_transform=None,
     )
 
