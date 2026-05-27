@@ -30,8 +30,14 @@ Example of good usage for this integration includes: long term metrics, triggeri
 - **Binary sensors**:
   - Binary outputs (e.g., relays/outlets).
   - Rope leak inputs as binary sensors.
-- **Periodic refresh**:
-  - Entity list refresh every 30 minutes to remove stale entities, while dosing log are pull every 5 minutes.
+- **Periodic refresh** (see [`docs/RATE_LIMITS.md`](../../docs/RATE_LIMITS.md) for full envelope):
+  - Entity list refresh every 30 minutes (per platform) to remove stale entities.
+  - Doser logs pulled every 5 minutes per doser.
+  - MQTT subscription watchdog: 5 s base, exponential backoff to 60 s on persistent failure (Issue #5).
+- **Backoff envelope** (v0.4.0+):
+  - HTTP polls back off exponentially on failure: 1× → 5× normal interval, reset on success.
+  - HTTP 429 with `Retry-After`: honored verbatim. Without it: 10× normal interval.
+  - Worst-case estimate per collective with 4 dosers: ~52 HTTP req/hr healthy, ~10 req/hr during a sustained outage.
 
 ## Notes
 - Credentials are stored in Home Assistant config entries.

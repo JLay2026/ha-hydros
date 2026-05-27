@@ -12,6 +12,13 @@ DEFAULT_REGION = "us-west-2"
 DEFAULT_WATCHDOG_INACTIVITY = 5
 DEFAULT_UNSANITIZED_DEBUG = False
 
+# Issue #5: rate-limit / backoff envelope. See docs/RATE_LIMITS.md.
+DOSING_POLL_INTERVAL_SECONDS = 300                 # 5 min, matches binary_sensor.py timer
+ENTITY_REFRESH_INTERVAL_SECONDS = 1800             # 30 min, matches sensor/binary_sensor timers
+MQTT_WATCHDOG_MAX_SECONDS = 60                     # cap for the exponential backoff
+BACKOFF_EXPONENT_CAP = 5                           # multiplier sequence: 1x, 2x, 4x, 5x, 5x, ...
+RATE_LIMITED_BACKOFF_MULTIPLIER = 10               # used for 429 responses without Retry-After
+
 PLATFORMS: list[str] = ["sensor", "binary_sensor", "button", "select"]
 
 SIGNAL_COLLECTIVE_UPDATED = "hydros_collective_updated_{entry}_{thing}"
