@@ -105,6 +105,45 @@ Tail `home-assistant.log` for `Hydros rate-limited`, `backing off`, `MQTT discon
 - **No coordinated jitter across users.** If multiple operators experience the same Coralvue outage, they will hit the cap at the same time. A future enhancement could add per-instance jitter to spread the recovery thundering herd.
 - **No persistence across restarts.** All backoff state is in-memory. A HA restart during a 429 window re-starts the polling at full cadence (which could land in the same Coralvue rate-limit window). Acceptable for v0.4.0; revisit if observed in practice.
 
+## Cloud-stale envelope (Issue #3)
+
+Layered on top of the polling cadence + retry backoff documented above is the **cloud-outage stale-tolerance** logic. The two systems compose:
+
+- The backoff envelope (Issue #5) controls *how often the integration tries* to reach the cloud.
+- The stale envelope (Issue #3) controls *what the entities show* when the integration cannot reach the cloud (or hasn't heard from MQTT in a while).
+
+| Time since last MQTT message | Per-thing entity state | `select` entity | Aggregator `binary_sensor.hydros_cloud_stale` |
+|---|---|---|---|
+| ≤ 30 s | `available=True`, current value, no `stale` attr | `available=True` | `off` |
+| 30 s – retention | `available=True`, cached value, `stale: true` attr | `available=False` (write-side; cached writes don't make sense) | `on` |
+| > retention | `available=False` (HA tile goes grey) | `available=False` | `unavailable` |
+
+**Retention window** is configurable per config entry (options flow → `Cloud stale retention seconds`). Default: 600 s (10 min). Clamped to `[30, 3600]` so misconfiguration can't permanently mask a real outage or pin entities to `stale` forever.
+
+**Transition logging** is one `WARNING` per state change per `thing_id`, not per refresh tick — so a 30-min outage produces ~3 log lines (fresh→stale, stale→unavailable, unavailable→fresh on recovery), not 360.
+
+**Composes with the backoff envelope this way:**
+
+- A 60-second WAN flicker now leaves per-thing read entities `available=True` with cached values + `stale: true` attribute, instead of flipping the entire Aquarium dashboard to grey tiles. The select entity for mode changes goes unavailable (writing during an outage would silently fail).
+- A 1-hour outage past the default 10-min retention takes per-thing entities to `unavailable` as today, and surfaces `binary_sensor.hydros_cloud_stale: unavailable` so the dashboard can show "cloud lost" as a first-class signal.
+- The backoff envelope from #5 keeps HTTP/MQTT call volume bounded during the same outage (~10 req/hr after the cap takes effect; ~70 MQTT reconnects/hr at worst).
+
+### Reproducing the stale-tolerant behavior
+
+Manual test (operator-side):
+
+```bash
+sudo tc qdisc add dev eth0 root netem loss 100%
+# Wait 35 s — per-thing sensors should keep their last value, with stale=True in attributes.
+# Wait 10 min 5 s — sensors flip to unavailable; binary_sensor.hydros_cloud_stale -> unavailable.
+sudo tc qdisc del dev eth0 root
+# First MQTT reconnect — sensors back to fresh; binary_sensor -> off.
+
+# In a second terminal, watch the log. Expect ~3 WARN lines for the outage cycle:
+journalctl -u home-assistant -f | grep -E '(Hydros cloud)'
+```
+
+
 ## Re-audit on every change to polling code
 
 If you change any of:

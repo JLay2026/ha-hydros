@@ -39,6 +39,39 @@ Example of good usage for this integration includes: long term metrics, triggeri
   - HTTP 429 with `Retry-After`: honored verbatim. Without it: 10× normal interval.
   - Worst-case estimate per collective with 4 dosers: ~52 HTTP req/hr healthy, ~10 req/hr during a sustained outage.
 
+## Cloud-outage resilience (v0.4.0+)
+
+When the Hydros cloud or your WAN is unreachable, per-thing entities don't flip to `unavailable` immediately. Instead:
+
+- **Fresh** (≤ 30 s since last MQTT message): normal behavior.
+- **Stale** (30 s — `Cloud stale retention seconds`, default 600 s / 10 min): entity keeps its last value; a new attribute `stale: true` appears so dashboards can flag the data without losing it.
+- **Unavailable** (past the retention window): entity goes `unavailable` as before.
+
+A new global binary sensor `binary_sensor.hydros_cloud_stale` aggregates the condition across all your collectives:
+
+| Aggregator state | Meaning |
+|---|---|
+| `off` | All entities fresh |
+| `on` | At least one entity is serving cached data |
+| `unavailable` | At least one entity is past the retention window |
+
+Tune the retention window via integration → Configure → `Cloud stale retention seconds` (clamped 30 – 3600).
+
+The mode-change `select` entity ignores the stale window: it stays `available=True` only while data is fresh, because writing a mode against a disconnected device would silently fail.
+
+Example alert that respects the new model (only fires when data is *actually* unavailable, not just briefly stale):
+
+```yaml
+alert:
+  hydros_cloud_down:
+    name: Hydros cloud unreachable
+    entity_id: binary_sensor.hydros_cloud_stale
+    state: "unavailable"
+    repeat: 30
+```
+
+See [`docs/RATE_LIMITS.md`](../../docs/RATE_LIMITS.md) for the full envelope and the manual `tc qdisc` reproduction recipe.
+
 ## Notes
 - Credentials are stored in Home Assistant config entries.
 - Debug samples are stored in memory (not persisted) and **sanitized by default** (Issue #6 / v0.4.0). Emails, JWT tokens, presigned S3 URLs, MQTT credentials embedded in URIs, and fields whose name suggests sensitive content (`password`, `token`, `secret`, `credential`, `signature`, `serial*`, `*accountId`, `*userId`, `*email`, `apikey`, `cookie`, `session*`, `x-amz-*`, `aws_*`, `*licenseKey`, `*productKey`) are replaced with `[REDACTED]` placeholders. Device-level identifiers (`thingId`, `thingName`, `thingType`) are kept intact so the debug output remains useful. The state attributes include a `sanitized: true` field so consumers know what they're looking at.

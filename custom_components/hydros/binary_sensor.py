@@ -16,7 +16,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
@@ -64,6 +64,9 @@ async def async_setup_entry(
     )
     entry_data["binary_sensor_manager"] = manager
     await manager.async_setup()
+
+    # Issue #3: register the global cloud-stale aggregator alongside per-thing entities.
+    async_add_entities([HydrosCloudStaleBinarySensor(hub, entry)])
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -337,11 +340,9 @@ class HydrosBinarySensor(BinarySensorEntity):
     def available(self) -> bool:
         if not self._thing_id:
             return False
-        last_ts = self._hub.get_latest_status_ts(self._thing_id)
-        if not last_ts:
-            return False
-        delta = (datetime.now(timezone.utc) - last_ts).total_seconds()
-        return delta <= 30
+        # Issue #3: serve cached value during the stale window. Previously
+        # used a hard 30s MQTT-heartbeat threshold.
+        return self._hub.cloud_state_for_thing(self._thing_id) != "unavailable"
 
     @property
     def is_on(self) -> bool | None:
@@ -480,3 +481,48 @@ class HydrosBinarySensor(BinarySensorEntity):
 
     def _handle_signal(self, _: str) -> None:
         self.schedule_update_ha_state()
+
+
+# --- Issue #3: cloud-outage resilience aggregator ---
+
+class HydrosCloudStaleBinarySensor(BinarySensorEntity):
+    """Global aggregator: reports whether any Hydros entity is serving cached data.
+
+    State semantics:
+      - off          : every configured collective is fresh
+      - on           : at least one collective is stale (still serving cached data)
+      - unavailable  : at least one collective is past the retention window
+
+    Polling: 30s default — cheap, just reads hub state. Avoids signal-storm
+    risk from per-watchdog dispatches.
+    """
+
+    _attr_should_poll = True
+    _attr_name = "Hydros Cloud Stale"
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hub: HydrosHub, entry: ConfigEntry) -> None:
+        self._hub = hub
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}-hydros-cloud-stale"
+
+    @property
+    def available(self) -> bool:
+        return self._hub.cloud_stale_global_state() != "unavailable"
+
+    @property
+    def is_on(self) -> bool:
+        return self._hub.cloud_stale_global_state() == "on"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        per_thing = self._hub.cloud_state_per_thing()
+        return {
+            "retention_seconds": self._hub.cloud_stale_retention_seconds,
+            "stale_thing_count": sum(1 for s in per_thing.values() if s == "stale"),
+            "unavailable_thing_count": sum(
+                1 for s in per_thing.values() if s == "unavailable"
+            ),
+            "per_thing_state": per_thing,
+        }
