@@ -11,6 +11,13 @@ All notable changes to this project are documented in this file.
 - **[#6]** New `Unsanitized debug output` options-flow toggle (default OFF) lets operators opt into raw debug output with a README warning. State attributes include a `sanitized: true/false` field so downstream consumers know what they're looking at.
 - **[#6]** Test suite at `tests/test_sanitizer.py` covers happy path, structure preservation, and each redaction category (key match, email, JWT, MQTT creds, presigned URL). Runs standalone with `python -m unittest tests.test_sanitizer`; will be picked up by `pytest` once the test runner is wired into CI.
 
+- **[#4 — Credential / secret handling audit]** New `docs/SECURITY.md` documents the audit method (reproducible grep patterns), findings, and the defensive changes applied. Direct logging in the integration was clean; the changes below are defense-in-depth against potential credential leaks in third-party `pyhydros` exception messages.
+- **[#4]** New public `sanitize_string()` helper in `custom_components/hydros/sanitizer.py` (re-export of the existing string-redaction logic). Wraps untrusted exception messages before they hit `%s` log formatters.
+- **[#4]** `hydros_hub.py` and `config_flow.py` `_LOGGER.{error,warning}` calls that pass `pyhydros` exception objects now route through `sanitize_string()`. Two `_LOGGER.exception(...)` call sites were replaced with `_LOGGER.error(... type=%s ...)` plus `_LOGGER.debug("...", exc_info=True)` so the full traceback (which can carry frame-local variables on some log-shipping integrations) emits only when the user explicitly enables DEBUG for `custom_components.hydros`.
+- **[#4]** 4 new tests in `tests/test_sanitizer.py` covering `sanitize_string()` against realistic pyhydros-style error messages (email, JWT, presigned URL, safe-message passthrough).
+
+> Follow-up: [#14](../../issues/14) tracks a direct audit of the `pyhydros` library for credential leaks in exception messages — deferred from v0.4.0 because the defense-in-depth wrappers above make it non-blocking.
+
 ## 0.3.4 - 2026-05-27
 
 > Sync from upstream Bitf1ip/ha-hydros v0.3.2–0.3.4. Brings in 0-10v variable-pump support, the XP8 Total Power sensor, and the hassfest CI workflow. Fork's H1 fix from v0.3.2 is retained (upstream's port in v0.3.3 was functionally identical so no merge needed). No new fork-specific changes in this release — purely upstream alignment.
