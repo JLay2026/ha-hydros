@@ -21,6 +21,7 @@ from .const import (
     DEFAULT_UNSANITIZED_DEBUG,
     DOMAIN,
 )
+from .sanitizer import sanitize_string
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -134,10 +135,24 @@ class HydrosConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         except HydrosAuthError:
             errors["base"] = "invalid_auth"
         except HydrosAPIError as err:
-            _LOGGER.error("Hydros API error while fetching collectives: %s", err)
+            # Issue #4: sanitize the third-party exception message.
+            _LOGGER.error(
+                "Hydros API error while fetching collectives: %s",
+                sanitize_string(str(err)),
+            )
             errors["base"] = "cannot_connect"
         except Exception as err:  # pragma: no cover
-            _LOGGER.exception("Unexpected Hydros error during config flow")
+            # Issue #4 (EXC-LOG-1): the password is a LOCAL variable in this
+            # stack frame. Demote the traceback to DEBUG so any frame-locals
+            # captured by log-shipping integrations don't expose it by default.
+            _LOGGER.error(
+                "Unexpected Hydros error during config flow (type=%s): %s",
+                type(err).__name__,
+                sanitize_string(str(err)),
+            )
+            _LOGGER.debug(
+                "Hydros config-flow exception traceback", exc_info=True
+            )
             errors["base"] = "unknown"
 
         if errors:

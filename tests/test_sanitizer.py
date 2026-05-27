@@ -1,4 +1,4 @@
-"""Tests for the debug payload sanitizer (Issue #6).
+"""Tests for the debug payload sanitizer (Issue #6) and exception sanitizer (Issue #4).
 
 Loads ``sanitizer.py`` directly by file path so the test doesn't pull in
 the full ``custom_components.hydros`` package (which transitively imports
@@ -36,6 +36,7 @@ REDACTED_EMAIL = sanitizer.REDACTED_EMAIL
 REDACTED_TOKEN = sanitizer.REDACTED_TOKEN
 REDACTED_PRESIGNED = sanitizer.REDACTED_PRESIGNED
 REDACTED_MQTT_CREDS = sanitizer.REDACTED_MQTT_CREDS
+sanitize_string = sanitizer.sanitize_string
 
 
 class SanitizerTest(unittest.TestCase):
@@ -164,6 +165,59 @@ class SanitizerTest(unittest.TestCase):
         self.assertNotIn("verysecret", flat)
         # No raw signature value.
         self.assertNotIn("X-Amz-Signature=secret", flat)
+
+
+    # --- Issue #4 (sanitize_string for exception logging) ---
+
+    def test_sanitize_string_passthrough_non_strings(self):
+        # sanitize_string returns non-strings unchanged so log call sites
+        # can wrap any err object's repr without type-checking first.
+        for val in (None, 42, 3.14, True, ["a"], {"k": "v"}):
+            self.assertEqual(sanitize_string(val), val)
+
+    def test_sanitize_string_redacts_pyhydros_style_error_email(self):
+        # Realistic pyhydros-style auth failure that might embed the
+        # operator's email in the error text.
+        err_msg = "Login failed for user alice@example.com: invalid credentials"
+        result = sanitize_string(err_msg)
+        self.assertNotIn("alice@example.com", result)
+        self.assertIn(REDACTED_EMAIL, result)
+        # The non-sensitive part of the message must remain.
+        self.assertIn("Login failed", result)
+        self.assertIn("invalid credentials", result)
+
+    def test_sanitize_string_redacts_pyhydros_style_error_jwt(self):
+        # Realistic pyhydros-style 401 error echoing the bearer token back.
+        err_msg = (
+            "HTTP 401 from https://api.hydros.example/v1/things: "
+            "token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signaturepart "
+            "is expired"
+        )
+        result = sanitize_string(err_msg)
+        self.assertIn(REDACTED_TOKEN, result)
+        self.assertNotIn("eyJhbGciOiJIUzI1NiJ9", result)
+        self.assertIn("HTTP 401", result)
+        self.assertIn("is expired", result)
+
+    def test_sanitize_string_redacts_pyhydros_style_error_presigned(self):
+        # MQTT/S3 broker URL with embedded presigned signature.
+        err_msg = (
+            "Failed to download config from "
+            "https://s3.amazonaws.com/hydros-cfg/file.json?X-Amz-Signature=abc&X-Amz-Credential=AKIA "
+            "(403 Forbidden)"
+        )
+        result = sanitize_string(err_msg)
+        self.assertIn(REDACTED_PRESIGNED, result)
+        self.assertNotIn("X-Amz-Signature=abc", result)
+        self.assertIn("403 Forbidden", result)
+
+    def test_sanitize_string_empty_and_safe_messages_pass_through(self):
+        self.assertEqual(sanitize_string(""), "")
+        self.assertEqual(sanitize_string("Connection refused"), "Connection refused")
+        self.assertEqual(
+            sanitize_string("Hydros thing 'abc-123' not found"),
+            "Hydros thing 'abc-123' not found",
+        )
 
 
 if __name__ == "__main__":

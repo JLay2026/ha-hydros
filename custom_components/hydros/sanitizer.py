@@ -171,3 +171,21 @@ def sanitize_payload(payload: Any, *, unsanitized: bool = False) -> Any:
     if unsanitized:
         return payload
     return _walk(payload)
+
+
+def sanitize_string(value: str) -> str:
+    """Apply value-shape redaction to a single string (Issue #4 helper).
+
+    Public re-export of the internal :func:`_redact_string_value` helper
+    for use when logging untrusted strings (e.g. exception messages from
+    third-party libraries that may embed credentials in error text).
+    Returns ``value`` unchanged when it isn't a string.
+
+    Used in ``hydros_hub.py`` and ``config_flow.py`` to wrap ``%s % err``
+    log statements where the exception came from ``pyhydros`` and could
+    in principle contain emails, JWTs, MQTT URIs with creds, or presigned
+    URLs. See ``docs/SECURITY.md`` for the audit that motivated this.
+    """
+    if not isinstance(value, str):
+        return value
+    return _redact_string_value(value)
