@@ -26,6 +26,7 @@ from .const import (
     SIGNAL_COLLECTIVE_UPDATED,
     SIGNAL_CONFIG_UPDATED,
 )
+from .sanitizer import sanitize_string
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -113,10 +114,23 @@ class HydrosHub:
             await self.async_resolve_collective_ids()
             await self.async_refresh_collective_metadata()
         except (HydrosAuthError, HydrosAPIError) as err:
-            _LOGGER.error("Hydros authentication or API error: %s", err)
+            # Issue #4: sanitize the third-party exception message before logging.
+            _LOGGER.error(
+                "Hydros authentication or API error (type=%s): %s",
+                type(err).__name__,
+                sanitize_string(str(err)),
+            )
             raise ConfigEntryNotReady from err
         except Exception as err:  # pragma: no cover
-            _LOGGER.exception("Unexpected Hydros setup error")
+            # Issue #4 (EXC-LOG-2): demote the traceback to DEBUG so any
+            # frame-locals captured by log-shipping integrations (Sentry,
+            # Datadog, etc.) don't leak credentials by default.
+            _LOGGER.error(
+                "Unexpected Hydros setup error (type=%s): %s",
+                type(err).__name__,
+                sanitize_string(str(err)),
+            )
+            _LOGGER.debug("Hydros setup exception traceback", exc_info=True)
             raise ConfigEntryNotReady from err
 
     async def async_unload(self) -> None:
@@ -324,11 +338,12 @@ class HydrosHub:
                         await self._hass.async_add_executor_job(api.authenticate)
                         entries = await self._hass.async_add_executor_job(_fetch_logs)
                     except Exception as retry_err:
+                        # Issue #4: sanitize the third-party exception message.
                         _LOGGER.warning(
                             "Failed to refresh dosing logs for %s/%s after re-auth: %s",
                             thing_id,
                             output_name,
-                            retry_err,
+                            sanitize_string(str(retry_err)),
                         )
                         return
                 else:
