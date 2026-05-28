@@ -11,15 +11,19 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import (
     CONF_ACCEPT_REMOTE_CONTROL_DISCLAIMER,
+    CONF_CLOUD_STALE_RETENTION_SECONDS,
     CONF_COLLECTIVES,
     CONF_ENABLE_REMOTE_CONTROL,
     CONF_PASSWORD,
     CONF_REGION,
     CONF_UNSANITIZED_DEBUG,
     CONF_USERNAME,
+    DEFAULT_CLOUD_STALE_RETENTION_SECONDS,
     DEFAULT_REGION,
     DEFAULT_UNSANITIZED_DEBUG,
     DOMAIN,
+    MAX_CLOUD_STALE_RETENTION_SECONDS,
+    MIN_CLOUD_STALE_RETENTION_SECONDS,
 )
 from .sanitizer import sanitize_string
 
@@ -231,6 +235,8 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
         self._config_entry = config_entry
         self._pending_enable_remote = False
         self._pending_unsanitized_debug = DEFAULT_UNSANITIZED_DEBUG
+        # Issue #3: cloud-outage retention window (per-entry override).
+        self._pending_cloud_stale_retention = DEFAULT_CLOUD_STALE_RETENTION_SECONDS
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         current_enabled = bool(
@@ -245,6 +251,12 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                 DEFAULT_UNSANITIZED_DEBUG,
             )
         )
+        current_retention = int(
+            self._config_entry.options.get(
+                CONF_CLOUD_STALE_RETENTION_SECONDS,
+                DEFAULT_CLOUD_STALE_RETENTION_SECONDS,
+            )
+        )
 
         schema = vol.Schema(
             {
@@ -256,6 +268,16 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                     CONF_UNSANITIZED_DEBUG,
                     default=current_unsanitized,
                 ): bool,
+                vol.Required(
+                    CONF_CLOUD_STALE_RETENTION_SECONDS,
+                    default=current_retention,
+                ): vol.All(
+                    int,
+                    vol.Range(
+                        min=MIN_CLOUD_STALE_RETENTION_SECONDS,
+                        max=MAX_CLOUD_STALE_RETENTION_SECONDS,
+                    ),
+                ),
             }
         )
 
@@ -270,12 +292,19 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
         self._pending_unsanitized_debug = bool(
             user_input.get(CONF_UNSANITIZED_DEBUG, DEFAULT_UNSANITIZED_DEBUG)
         )
+        self._pending_cloud_stale_retention = int(
+            user_input.get(
+                CONF_CLOUD_STALE_RETENTION_SECONDS,
+                DEFAULT_CLOUD_STALE_RETENTION_SECONDS,
+            )
+        )
         if not enable_remote:
             return self.async_create_entry(
                 title="",
                 data={
                     CONF_ENABLE_REMOTE_CONTROL: False,
                     CONF_UNSANITIZED_DEBUG: self._pending_unsanitized_debug,
+                    CONF_CLOUD_STALE_RETENTION_SECONDS: self._pending_cloud_stale_retention,
                 },
             )
 
@@ -315,6 +344,7 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
                 data={
                     CONF_ENABLE_REMOTE_CONTROL: False,
                     CONF_UNSANITIZED_DEBUG: self._pending_unsanitized_debug,
+                    CONF_CLOUD_STALE_RETENTION_SECONDS: self._pending_cloud_stale_retention,
                 },
             )
 
@@ -323,5 +353,6 @@ class HydrosOptionsFlow(config_entries.OptionsFlowWithConfigEntry):
             data={
                 CONF_ENABLE_REMOTE_CONTROL: True,
                 CONF_UNSANITIZED_DEBUG: self._pending_unsanitized_debug,
+                CONF_CLOUD_STALE_RETENTION_SECONDS: self._pending_cloud_stale_retention,
             },
         )

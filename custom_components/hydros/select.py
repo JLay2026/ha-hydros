@@ -195,11 +195,10 @@ class HydrosModeSelect(SelectEntity):
     def available(self) -> bool:
         if not self._thing_id:
             return False
-        last_ts = self._hub.get_latest_status_ts(self._thing_id)
-        if not last_ts:
-            return False
-        delta = (datetime.now(timezone.utc) - last_ts).total_seconds()
-        return delta <= 30
+        # Issue #3: write-side entity. Stale-cached reads are useful, but
+        # writing a mode change against a disconnected device is misleading
+        # — keep available True only while data is fresh.
+        return self._hub.cloud_state_for_thing(self._thing_id) == "fresh"
 
     @property
     def current_option(self) -> str | None:
