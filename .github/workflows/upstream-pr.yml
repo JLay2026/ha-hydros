@@ -1,19 +1,30 @@
-# Auto-open upstream PR when an `upstream/*` branch merges to fork main
+# Auto-open upstream PR — currently in STAND-BY mode.
 #
-# Triggered by: pull_request_target (closed event), filtered to merged=true
-# and head branch matching `upstream/**`.
+# Previous behavior: on merge of an `upstream/*` branch, this workflow opened a
+# cross-repo PR to `Bitf1ip/ha-hydros` using a fine-grained Personal Access
+# Token stored as the `UPSTREAM_PR_TOKEN` secret. Authorship of the upstream
+# PR was attributed to the PAT owner (JLay2026), not `github-actions[bot]`.
 #
-# Authorship: uses UPSTREAM_PR_TOKEN secret (a fine-grained PAT owned by
-# JLay2026, scoped to Bitf1ip/ha-hydros with pull_requests:write +
-# contents:read). This ensures the upstream PR is attributed to JLay2026,
-# not github-actions[bot] or any service account.
+# Why disabled: fine-grained PATs targeting a repo require the repo owner to
+# opt in to fine-grained PAT access for their account/org. Bitf1ip has not.
+# Without that opt-in, the only alternative is a classic PAT with `public_repo`
+# scope, whose blast radius (write to every public repo the user collaborates
+# on) is higher than the value of automating one PR per merge.
 #
-# See CONTRIBUTING.md for the PAT setup procedure.
+# Decision: upstream PRs are opened MANUALLY going forward. See
+# CONTRIBUTING.md → "Manual upstream PR submission" for the workflow.
 #
-# If UPSTREAM_PR_TOKEN is not configured, the workflow fails loudly so
-# the operator knows to set it up before relying on the automation.
+# To re-enable auto-PR mode later:
+#   1. Configure `UPSTREAM_PR_TOKEN` secret (either a classic PAT with
+#      public_repo scope, or a fine-grained PAT if Bitf1ip opts in).
+#   2. Revert the silenced guard step below: restore the original `exit 1`
+#      and remove the manual-mode `::notice::` lines.
+#   3. Update CONTRIBUTING.md to reflect the re-enabled automation.
+#
+# This file is kept in place rather than deleted so the revert path is
+# discoverable and the git history of the original workflow is preserved.
 
-name: Auto-open upstream PR
+name: Auto-open upstream PR (disabled — manual mode)
 
 on:
   pull_request_target:
@@ -25,7 +36,7 @@ permissions:
 
 jobs:
   open-upstream-pr:
-    name: Open upstream PR for merged upstream/* branch
+    name: Manual mode — skip auto-PR for merged upstream/* branch
     runs-on: ubuntu-latest
     # Only run when the PR was merged AND the head branch starts with upstream/
     if: |
@@ -33,86 +44,25 @@ jobs:
       startsWith(github.event.pull_request.head.ref, 'upstream/')
 
     steps:
-      - name: Verify UPSTREAM_PR_TOKEN is configured
+      - name: Manual mode — emit notice and exit cleanly
         env:
           UPSTREAM_PR_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN }}
-        run: |
-          if [ -z "$UPSTREAM_PR_TOKEN" ]; then
-            echo "::error::UPSTREAM_PR_TOKEN secret is not configured."
-            echo "::error::Cannot open upstream PR without a JLay2026-owned PAT."
-            echo "::error::See CONTRIBUTING.md → 'One-time PAT setup' for instructions."
-            exit 1
-          fi
-
-      - name: Checkout fork (at merge commit)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Re-push branch (in case it was auto-deleted on merge)
-        env:
-          BRANCH: ${{ github.event.pull_request.head.ref }}
-          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-        run: |
-          # The merge commit is the squash-merged version on main, but the
-          # upstream PR should reflect the work as one cohesive change.
-          # We push the merge_commit_sha to a same-named branch so upstream
-          # sees the squashed change with the original PR title/body.
-          
-          # If the original branch still exists on the fork (auto-delete
-          # disabled), GitHub treats this as a no-op. If it was deleted,
-          # this re-creates it pointing at the merge commit.
-          git push origin "$MERGE_SHA:refs/heads/$BRANCH" --force-with-lease || \
-            git push origin "$MERGE_SHA:refs/heads/$BRANCH"
-
-      - name: Open upstream PR (authored as JLay2026)
-        env:
-          # CRITICAL: use the PAT, not GITHUB_TOKEN, so the PR author is JLay2026
-          GH_TOKEN: ${{ secrets.UPSTREAM_PR_TOKEN }}
-          BRANCH: ${{ github.event.pull_request.head.ref }}
-          FORK_PR_NUMBER: ${{ github.event.pull_request.number }}
-          FORK_PR_TITLE: ${{ github.event.pull_request.title }}
-          FORK_PR_BODY: ${{ github.event.pull_request.body }}
           FORK_PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          # Build the upstream PR body: includes the fork PR's body verbatim,
-          # plus a header noting the provenance and a footer linking back.
-          UPSTREAM_BODY=$(cat <<EOF
-          > **Provenance:** mirrors [JLay2026/ha-hydros#${FORK_PR_NUMBER}](${FORK_PR_URL}), which landed in the v0.4.x hardening line for production use in the [Workshop dashboard project](https://github.com/JLay2026/HA-dashboard).
-
-          ---
-
-          ${FORK_PR_BODY}
-
-          ---
-
-          Opened automatically by [.github/workflows/upstream-pr.yml](https://github.com/JLay2026/ha-hydros/blob/main/.github/workflows/upstream-pr.yml) on merge of the fork-side PR. Authored by @JLay2026 (PR creation authenticated via fine-grained PAT scoped to this repo).
-          EOF
-          )
-
-          gh pr create \
-            --repo Bitf1ip/ha-hydros \
-            --base main \
-            --head "JLay2026:${BRANCH}" \
-            --title "${FORK_PR_TITLE}" \
-            --body "${UPSTREAM_BODY}"
-
-      - name: Comment on fork PR with upstream PR link
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          FORK_PR_NUMBER: ${{ github.event.pull_request.number }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          # Find the just-opened upstream PR
-          UPSTREAM_PR_URL=$(GH_TOKEN="${{ secrets.UPSTREAM_PR_TOKEN }}" gh pr list \
-            --repo Bitf1ip/ha-hydros \
-            --head "JLay2026:${BRANCH}" \
-            --json url --jq '.[0].url')
-
-          if [ -n "$UPSTREAM_PR_URL" ]; then
-            gh pr comment "$FORK_PR_NUMBER" --body "🔗 Upstream PR opened: $UPSTREAM_PR_URL"
-          else
-            echo "::warning::Could not find the upstream PR to link back"
+          # Stand-by mode: UPSTREAM_PR_TOKEN is intentionally not configured.
+          # See file header for rationale and the revert procedure.
+          if [ -z "$UPSTREAM_PR_TOKEN" ]; then
+            echo "::notice::Manual upstream-PR mode active. See CONTRIBUTING.md → 'Manual upstream PR submission'."
+            echo "::notice::Branch merged: $BRANCH"
+            echo "::notice::Fork PR: $FORK_PR_URL"
+            echo "::notice::Operator action: open the upstream PR manually against Bitf1ip/ha-hydros."
+            exit 0
           fi
+          # If the secret IS configured, still skip (rather than fall through
+          # to the original behavior) and prompt the operator to follow the
+          # revert procedure above. This avoids accidentally opening upstream
+          # PRs through a token that wasn't audited against the new flow.
+          echo "::warning::UPSTREAM_PR_TOKEN is set but auto-PR has been intentionally disabled."
+          echo "::warning::Restore the original guard logic and review the workflow before re-enabling."
+          exit 0
