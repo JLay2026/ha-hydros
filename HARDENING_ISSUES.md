@@ -27,7 +27,7 @@ This fork (`JLay2026/ha-hydros`) hardens [`Bitf1ip/ha-hydros`](https://github.co
 - [ ] v0.4.0 tagged with #3, #4, #5, #6 implemented (code)
 - [ ] v0.4.1 tagged with #7, #8 (docs only)
 - [ ] Hardened fork installed on HA host; `Bitf1ip/ha-hydros` v0.3.4 uninstalled
-- [ ] Entity manifest captured into [`HA-dashboard/docs/entity-manifests/hydros.md`](https://github.com/JLay2026/HA-dashboard/blob/main/docs/entity-manifests/hydros.md)
+- [x] Entity manifest captured into [`HA-dashboard/docs/entity-manifests/hydros.md`](https://github.com/JLay2026/HA-dashboard/blob/main/docs/entity-manifests/hydros.md)
 - [ ] ≥1 upstream PR opened back to `Bitf1ip/ha-hydros` (the workflow does this automatically on merge of any `upstream/*` branch — see [CONTRIBUTING.md](./CONTRIBUTING.md))
 
 ## Why these specific items
