@@ -6,7 +6,7 @@ All notable changes to this project are documented in this file.
 
 > Hardening sprint. Four reliability + security items shipped: cloud-outage resilience ([#3](../../issues/3)), credential audit ([#4](../../issues/4)), rate-limit / backoff posture ([#5](../../issues/5)), MQTT debug-sample sanitization ([#6](../../issues/6)).
 >
-> **Domain rename deferred.** The 0.3.2 CHANGELOG entry below mentions a planned `hydros` → `hydros_ha_plus` domain rename for this release. None of the v0.4.0 PRs implemented a config-entry migration path, so renaming would break every existing fork user's config entry and entity IDs. The rename is deferred to a future release with proper migration code + a major-version bump.
+> **Domain rename on hold.** The 0.3.2 CHANGELOG entry below mentioned a planned `hydros` → `hydros_ha_plus` domain rename for this release. The rename is on hold pending the strategic decision between (a) permanent fork or (b) contributing this work back upstream. If upstream contribution is the path forward, the rename never happens. If permanent fork is the path forward, the rename needs config-entry migration code (not implemented in any v0.4.0 PR) plus a major-version bump. Either way, no rename in v0.4.0.
 
 ### Added
 - **[#6 — MQTT debug-sample sanitization]** New `custom_components/hydros/sanitizer.py` redacts sensitive content from the debug sample sensor's state attributes by default. Replaces emails, JWT tokens, presigned S3 URLs, MQTT-URI-embedded credentials, and values for keys matching `password`/`token`/`secret`/`credential`/`signature`/`serial*`/`*accountId`/`*userId`/`*email`/`apikey`/`cookie`/`session*`/`x-amz-*`/`aws_*`/`*licenseKey`/`*productKey` with `[REDACTED]` placeholders. Device identifiers (`thingId`, `thingName`, `thingType`) are preserved so debugging stays useful.
@@ -37,7 +37,7 @@ All notable changes to this project are documented in this file.
 - Auto-upstream-PR workflow silenced (PR #18). `.github/workflows/upstream-pr.yml` now emits a `::notice::` and exits 0 instead of failing, because fine-grained PATs to Bitf1ip/ha-hydros require Bitf1ip's opt-in. Upstream PRs are opened manually per CONTRIBUTING.md → "Manual upstream PR submission".
 
 ### Deferred
-- Domain rename `hydros` → `hydros_ha_plus` (originally planned for v0.4.0 per the 0.3.2 release note). Requires a config-entry migration to avoid breaking every existing fork user's entity IDs and config entry. Tracked as a follow-up for a future major-version release.
+- Domain rename `hydros` → `hydros_ha_plus` — **on hold pending fork-vs-upstream-contribute decision**. See release note above. Does not happen in v0.4.0 regardless of outcome.
 - [#14](../../issues/14) tracks a direct audit of the `pyhydros` library for credential leaks in exception messages — the defense-in-depth wrappers from #4 make it non-blocking.
 - [#10](../../issues/10) tracks fork-lineage cleanup (no common ancestor with upstream). Sync workflow's fast-forward path is degraded; manual cherry-picks remain how upstream changes land.
 
