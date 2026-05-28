@@ -2,9 +2,11 @@
 
 All notable changes to this project are documented in this file.
 
-## Unreleased — v0.4.0 (in progress)
+## 0.4.0 - 2026-05-28
 
-> Hardening sprint. v0.4.0 will be tagged after issues [#3](../../issues/3), [#4](../../issues/4), [#5](../../issues/5), and [#6](../../issues/6) are all merged. Each PR below adds to this section; the section is renamed to `## 0.4.0 - YYYY-MM-DD` on release.
+> Hardening sprint. Four reliability + security items shipped: cloud-outage resilience ([#3](../../issues/3)), credential audit ([#4](../../issues/4)), rate-limit / backoff posture ([#5](../../issues/5)), MQTT debug-sample sanitization ([#6](../../issues/6)).
+>
+> **Domain rename on hold.** The 0.3.2 CHANGELOG entry below mentioned a planned `hydros` → `hydros_ha_plus` domain rename for this release. The rename is on hold pending the strategic decision between (a) permanent fork or (b) contributing this work back upstream. If upstream contribution is the path forward, the rename never happens. If permanent fork is the path forward, the rename needs config-entry migration code (not implemented in any v0.4.0 PR) plus a major-version bump. Either way, no rename in v0.4.0.
 
 ### Added
 - **[#6 — MQTT debug-sample sanitization]** New `custom_components/hydros/sanitizer.py` redacts sensitive content from the debug sample sensor's state attributes by default. Replaces emails, JWT tokens, presigned S3 URLs, MQTT-URI-embedded credentials, and values for keys matching `password`/`token`/`secret`/`credential`/`signature`/`serial*`/`*accountId`/`*userId`/`*email`/`apikey`/`cookie`/`session*`/`x-amz-*`/`aws_*`/`*licenseKey`/`*productKey` with `[REDACTED]` placeholders. Device identifiers (`thingId`, `thingName`, `thingType`) are preserved so debugging stays useful.
@@ -31,7 +33,13 @@ All notable changes to this project are documented in this file.
 - **[#3]** New tests/test_cloud_stale.py: 10 standalone-runnable tests covering empty-state → unavailable, fresh/stale/unavailable boundaries, retention clamping, global aggregate semantics, and the once-per-transition log behavior. All pass; same `importlib.util` loader pattern as the other test files.
 - **[#3]** README: new Cloud-outage resilience section with example alert that uses the new aggregator. docs/RATE_LIMITS.md: new section explaining how the cloud-stale envelope composes with the rate-limit / backoff envelope from #5, plus the manual `tc qdisc` reproduction recipe.
 
-> Follow-up: [#14](../../issues/14) tracks a direct audit of the `pyhydros` library for credential leaks in exception messages — deferred from v0.4.0 because the defense-in-depth wrappers above make it non-blocking.
+### Changed
+- Auto-upstream-PR workflow silenced (PR #18). `.github/workflows/upstream-pr.yml` now emits a `::notice::` and exits 0 instead of failing, because fine-grained PATs to Bitf1ip/ha-hydros require Bitf1ip's opt-in. Upstream PRs are opened manually per CONTRIBUTING.md → "Manual upstream PR submission".
+
+### Deferred
+- Domain rename `hydros` → `hydros_ha_plus` — **on hold pending fork-vs-upstream-contribute decision**. See release note above. Does not happen in v0.4.0 regardless of outcome.
+- [#14](../../issues/14) tracks a direct audit of the `pyhydros` library for credential leaks in exception messages — the defense-in-depth wrappers from #4 make it non-blocking.
+- [#10](../../issues/10) tracks fork-lineage cleanup (no common ancestor with upstream). Sync workflow's fast-forward path is degraded; manual cherry-picks remain how upstream changes land.
 
 ## 0.3.4 - 2026-05-27
 
@@ -48,7 +56,7 @@ All notable changes to this project are documented in this file.
 
 ## 0.3.2 - 2026-05-06
 
-> First release on the JLay2026 community fork. The HACS domain remains `hydros` for this release; rename to `hydros_ha_plus` ships in v0.4.0.
+> First release on the JLay2026 community fork. The HACS domain remains `hydros` for this release; rename to `hydros_ha_plus` was originally planned for v0.4.0 but has been deferred (see v0.4.0 release notes for rationale).
 
 ### Fixed
 - **H1 (high):** `select.py` called two methods that did not exist on `HydrosHub` — `async_force_status_from_api` and `invalidate_collective_config`. When a mode change failed, the recovery path crashed with `AttributeError`, masking the original API error. Both methods are now implemented; the recovery path correctly invalidates the cached collective config, re-fetches authoritative status from REST, merges it into `_collective_status`, and dispatches the per-thing signal so dependent entities refresh.
