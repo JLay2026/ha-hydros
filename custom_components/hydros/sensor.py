@@ -53,6 +53,7 @@ from .entity_builders import (
     build_output_sensor_description,
 )
 from .sanitizer import sanitize_payload
+from .deadband import settle
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -65,6 +66,8 @@ class HydrosSensorEntityDescription(SensorEntityDescription):
     section: str = "Input"
     primary_key: str | None = None
     value_transform: Callable[[float], float] | None = None
+    # Hysteresis width for noisy numeric inputs (see deadband.py). None = off.
+    deadband: float | None = None
 
 
 ALERT_LEVEL_LABELS = {
@@ -104,9 +107,13 @@ OUTPUT_STATE_ALIASES = {
     "auto": -1,
 }
 
+# pH carries no unit: HA's `ph` device class requires
+# native_unit_of_measurement None and logs a warning (and refuses long-term
+# statistics) when a unit such as "pH" is set. Changed 2026-10-03; existing
+# installs get a one-time "unit changed" statistics repair to accept.
 _PROBE_MODE_META = {
     1: {
-        "unit": "pH",
+        "unit": None,
         "device_class": SensorDeviceClass.PH,
         "state_class": SensorStateClass.MEASUREMENT,
     },
@@ -128,7 +135,7 @@ SENSE_MODE_MAP = {
         "state_class": SensorStateClass.MEASUREMENT,
     },
     "ph": {
-        "unit": "pH",
+        "unit": None,
         "device_class": SensorDeviceClass.PH,
         "state_class": SensorStateClass.MEASUREMENT,
     },
@@ -221,6 +228,11 @@ OUTPUT_PAYLOAD_KEYS = (
     "reservoir",
 )
 
+# Electrical readings arrive with every status message and flap at the ADC
+# noise floor. They are not mirrored into attributes (see
+# extra_state_attributes); each has its own Output sensor instead.
+OUTPUT_CHURN_KEYS = ("powerI", "current", "voltageI", "frequency")
+
 OUTPUT_VALUE_TRANSFORMS = {
     "powerI": (UnitOfPower.WATT, 0.1),
     "current": (UnitOfElectricCurrent.AMPERE, 0.001),
@@ -229,15 +241,16 @@ OUTPUT_VALUE_TRANSFORMS = {
     "reservoir": (UnitOfVolume.MILLILITERS, 1.0),
 }
 
+# Status-payload fields surfaced on the health entity. Deliberately excludes
+# per-message volatiles (`millis`, `time`, `temperatureI`): every attribute
+# change is a state_changed event the recorder writes a row for, and these
+# changed on every ~2 s heartbeat (2026-10-03 recorder churn finding).
 COLLECTIVE_STATUS_FIELDS = (
     "collectiveStatus",
     "collectiveMaster",
     "mode",
-    "millis",
     "hostname",
-    "time",
     "bootTime",
-    "temperatureI",
     "version",
     "build",
 )
@@ -740,6 +753,8 @@ class HydrosSensor(SensorEntity):
         self._section = description.section
         self._primary_key = description.primary_key
         self._value_transform = description.value_transform
+        self._deadband = description.deadband
+        self._last_reported: float | int | None = None
         self._last_health_state: str | None = None
         self._attr_should_poll = description.section == "Collective"
         self._self_dispatch = False
@@ -761,6 +776,9 @@ class HydrosSensor(SensorEntity):
         self._section = description.section
         self._primary_key = description.primary_key
         self._value_transform = description.value_transform
+        if self._deadband != description.deadband:
+            self._last_reported = None
+        self._deadband = description.deadband
         self._attr_should_poll = description.section == "Collective"
         if self._section == "Collective":
             self._last_health_state = None
@@ -913,31 +931,40 @@ class HydrosSensor(SensorEntity):
                 if numeric is not None:
                     if self._section == "Output":
                         return _normalize_output_value(key, numeric, metadata)
-                    return self._apply_input_transform(numeric)
+                    return self._settle(self._apply_input_transform(numeric))
             return None
 
         numeric_value = _coerce_numeric(value)
         if numeric_value is not None:
             if self._section == "Output":
                 return _normalize_output_value(self._primary_key, numeric_value, metadata)
-            return self._apply_input_transform(numeric_value)
+            return self._settle(self._apply_input_transform(numeric_value))
         return None
+
+    def _settle(self, value: Any) -> Any:
+        """Apply the input deadband (see deadband.py) and remember the result."""
+        reported = settle(self._last_reported, value, self._deadband)
+        if isinstance(reported, (int, float)) and not isinstance(reported, bool):
+            self._last_reported = reported
+        return reported
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         if self._section == "Collective":
             attrs: dict[str, Any] = {}
             last_ts = self._hub.get_latest_status_ts(self._thing_id)
-            now = datetime.now(timezone.utc)
 
+            # Floored to the minute on purpose: an attribute that changed on
+            # every ~2 s heartbeat made this entity emit a state_changed
+            # event (and a recorder row) per message. Minute granularity is
+            # enough to see "is it alive"; the state itself flips to
+            # "offline" after COLLECTIVE_HEARTBEAT_OFFLINE_SECONDS anyway.
+            # `seconds_since_last_message` and `message_count` were removed
+            # for the same reason (both changed every message).
             if last_ts:
-                attrs["last_message"] = last_ts.isoformat()
-                attrs["seconds_since_last_message"] = round((now - last_ts).total_seconds(), 3)
-            else:
-                attrs["seconds_since_last_message"] = None
+                attrs["last_message"] = last_ts.replace(second=0, microsecond=0).isoformat()
 
             attrs["mqtt_subscribed"] = self._hub.is_collective_subscribed(self._thing_id)
-            attrs["message_count"] = self._hub.get_collective_message_count(self._thing_id)
             payload = self._hub.get_collective_status_payload(self._thing_id) or {}
             for key in COLLECTIVE_STATUS_FIELDS:
                 if key in payload:
@@ -957,12 +984,7 @@ class HydrosSensor(SensorEntity):
                 "hostname": payload.get("hostname"),
                 "version": payload.get("version"),
                 "build": payload.get("build"),
-                "last_update": None,
             }
-
-            ts = self._hub.get_latest_status_ts(self._thing_id)
-            if ts:
-                attrs["last_update"] = ts.isoformat()
 
             return {k: v for k, v in attrs.items() if v is not None} or None
 
@@ -1030,14 +1052,10 @@ class HydrosSensor(SensorEntity):
             if not sources:
                 return None
 
-            attrs = {
+            return {
                 "source_count": len(sources),
                 "sources": sources,
             }
-            ts = self._hub.get_latest_status_ts(self._thing_id)
-            if ts:
-                attrs["last_update"] = ts.isoformat()
-            return attrs
 
         if self._section == "DosedToday":
             attrs: dict[str, Any] = {}
@@ -1067,6 +1085,20 @@ class HydrosSensor(SensorEntity):
                     except (TypeError, ValueError):
                         value = metadata[key]
                 attrs[key] = value
+        # Recorder churn (2026-10-03): the raw per-message readings used to be
+        # echoed into attributes (`last_value`, `last_rawValue`, `last_powerI`,
+        # ...). They change on every MQTT heartbeat, so HA fired a
+        # state_changed event and wrote a recorder row even when the settled
+        # state was identical. Input readings are the entity state itself and
+        # electrical readings have their own Output sensors, so neither is
+        # repeated here any more. Output `valueState`/`state`/`reservoir` only
+        # change on real events and are kept.
+        if self._section == "Output":
+            payload_keys = tuple(
+                key for key in payload_keys if key not in OUTPUT_CHURN_KEYS
+            )
+        else:
+            payload_keys = ()
         for key in payload_keys:
             if key in payload and f"last_{key}" not in attrs:
                 value = payload[key]
@@ -1112,10 +1144,11 @@ class HydrosSensor(SensorEntity):
                 if label:
                     attrs["probeMode_label"] = label
 
-        ts = self._hub.get_latest_status_ts(self._thing_id)
-        if ts:
-            attrs["last_update"] = ts.isoformat()
-
+        # No per-message `last_update` here (removed 2026-10-03): it changed
+        # on every heartbeat and forced a state_changed event + recorder row
+        # for every entity every ~2 s even when the reading was unchanged.
+        # Freshness lives on the health entity (`last_message`, minute
+        # granularity) and the `stale` flag below.
         collective = self._hub.get_collective_metadata(self._thing_id)
         if isinstance(collective, dict) and collective.get("serialNum"):
             attrs.setdefault("serial_number", collective.get("serialNum"))
