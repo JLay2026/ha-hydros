@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.4.1 - 2026-10-03
+
+> Recorder-churn fix. On a live install every HYDROS entity was producing a `state_changed` event — and a recorder row — on every MQTT heartbeat (~2 s), even when the reading had not changed: measured 408 rows/hour on a single temperature sensor and the integration was the single largest writer to `home-assistant_v2.db`. Two causes, both fixed here.
+
+### Fixed
+- **Attribute churn.** Entities stamped the message timestamp and the raw per-message readings into `extra_state_attributes`. Home Assistant fires `state_changed` whenever *any* attribute changes, so the recorder wrote a row per message regardless of state. Removed:
+  - `last_update` on every Input/Output sensor and Output binary sensor (freshness is still available on the per-device health sensor's `last_message`, now floored to the minute, and on the `stale` attribute / `binary_sensor.hydros_cloud_stale`).
+  - `last_value`, `last_reading`, `last_rawValue`, `last_probeValue`, `last_probeRawValue`, `last_senseValue`, `last_current` (+ `_raw`) on Input sensors — the entity state already carries the reading.
+  - `last_powerI`, `last_current`, `last_voltageI`, `last_frequency` (+ `_unit`) on Output sensors and `payload_powerI` / `payload_current` / `payload_voltageI` / `payload_frequency` (+ `_float`) on Output binary sensors — each electrical reading has its own Output sensor entity.
+  - `seconds_since_last_message`, `message_count`, and the `millis` / `time` / `temperatureI` status fields on the health sensor.
+  - `last_update` on the Collective Mode and XP8 Power sensors.
+  Output `valueState` / `state` / `reservoir` attributes are kept; they only change on real events.
+- **ADC one-step flapping.** A stable tank sits on a controller resolution boundary most of the time (temperature steps are 0.125 °C, pH 0.01), so the reported value toggled between two adjacent steps every message. New `custom_components/hydros/deadband.py` applies a deadband slightly wider than one step (temp 0.15 °C, pH 0.015) before the value is published: a one-step flap is held at the last-reported value, any move of two steps or more passes immediately, and a slow drift is tracked with at most one step of lag. Other inputs (ORP, dKH, level, flow) are unchanged. `HydrosSensorEntityDescription` gained a `deadband` field; `build_input_sensor_description` sets it from `deadband_for(sense_mode, probe_mode)`.
+- **pH unit.** pH sensors declared `native_unit_of_measurement="pH"`; Home Assistant's `ph` device class requires no unit and logged a warning on every start. Unit is now `None`. Existing installs will see a one-time "unit changed" long-term-statistics repair for each pH entity — accept it to keep history.
+
+### Added
+- `tests/test_deadband.py` — standalone unit tests for `deadband_for` / `settle` (same import pattern as `test_sanitizer.py`).
+
 ## 0.4.0 - 2026-05-28
 
 > Hardening sprint. Four reliability + security items shipped: cloud-outage resilience ([#3](../../issues/3)), credential audit ([#4](../../issues/4)), rate-limit / backoff posture ([#5](../../issues/5)), MQTT debug-sample sanitization ([#6](../../issues/6)).
