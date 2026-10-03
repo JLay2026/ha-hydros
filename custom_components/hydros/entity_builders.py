@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfPower, UnitOfTemperature, UnitOfVolume, UnitOfVolumeFlowRate
 from homeassistant.util import slugify
 
+from .deadband import deadband_for
 from .types import coerce_int as _coerce_int
 from .types import is_variable_pump_output
 
@@ -36,6 +37,7 @@ def build_input_sensor_description(
 
     mapping: dict[str, Any] = dict(sense_mode_map.get(sense_mode, {}))
     suggested_precision: int | None = None
+    probe_mode_value: int | None = None
     if sensor_type == "probe":
         probe_mode_value = _coerce_int(sensor_meta.get("probeMode"))
         mapping = dict(probe_mode_meta.get(probe_mode_value, {}))
@@ -68,6 +70,9 @@ def build_input_sensor_description(
         section="Input",
         value_transform=transform,
         suggested_display_precision=suggested_precision,
+        # Suppress ADC one-step flapping on noisy inputs (recorder churn,
+        # 2026-10-03). None = pass-through.
+        deadband=deadband_for(sense_mode, probe_mode_value),
     )
 
 
