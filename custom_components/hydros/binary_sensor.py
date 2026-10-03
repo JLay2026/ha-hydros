@@ -24,10 +24,10 @@ from .hydros_hub import HydrosHub
 from .types import is_binary_output, is_doser_output
 from .entity_builders import build_output_binary_description, build_rope_leak_description
 from .sensor import (
+    OUTPUT_CHURN_KEYS,
     OUTPUT_STATE_ALIASES,
     _coerce_int,
     _map_output_state_label,
-    _normalize_output_value,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -405,16 +405,14 @@ class HydrosBinarySensor(BinarySensorEntity):
         attrs: dict[str, Any] = {}
         if payload:
             for key, value in payload.items():
-                attr_key = f"payload_{key}"
-                attrs[attr_key] = value
-                normalized_key: str | None = None
-                if key in {"voltageI", "current", "powerI", "frequency"}:
-                    normalized = _normalize_output_value(key, value)
-                    if isinstance(normalized, (int, float)):
-                        normalized_key = f"{attr_key}_float"
-                        if key == "frequency":
-                            normalized = round(normalized, 3)
-                        attrs[normalized_key] = normalized
+                # Recorder churn (2026-10-03): electrical readings flap on
+                # every heartbeat and are exposed as their own Output
+                # sensors, so they are no longer mirrored into attributes
+                # (`payload_powerI`, `payload_powerI_float`, ...). Doing so
+                # forced a state_changed event + recorder row per message.
+                if key in OUTPUT_CHURN_KEYS:
+                    continue
+                attrs[f"payload_{key}"] = value
         if metadata:
             for key, value in metadata.items():
                 if key == "flowRate":
@@ -436,10 +434,7 @@ class HydrosBinarySensor(BinarySensorEntity):
             if updated:
                 attrs["dosing_total_updated"] = updated.isoformat()
 
-        if attrs:
-            last_ts = self._hub.get_latest_status_ts(self._thing_id)
-            if last_ts:
-                attrs["last_update"] = last_ts.isoformat()
+        # No per-message `last_update` (removed 2026-10-03) — see sensor.py.
 
         return attrs or None
 
